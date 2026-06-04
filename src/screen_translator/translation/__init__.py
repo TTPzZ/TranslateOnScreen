@@ -1,0 +1,2 @@
+"""Desktop translation clients."""
+

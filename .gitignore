@@ -1,0 +1,44 @@
+# Python caches and build outputs
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+.venv*/
+venv/
+env/
+
+# Local runtime state
+logs/
+*.log
+settings.json
+*.db
+*.sqlite
+*.sqlite3
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*credential*
+*credentials*
+*secret*
+*secrets*
+service-account*.json
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

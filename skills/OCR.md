@@ -1,0 +1,3 @@
+# OCR Skill
+
+Use PaddleOCR.
