@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from screen_translator.controller.mode_controller import ModeController
 from screen_translator.controller.state import ModeState
-from screen_translator.domain.models import CapturedImage, ScreenRegion
+from screen_translator.domain.models import (
+    CapturedImage,
+    OverlayStyleMode,
+    ScreenRegion,
+    TranslationZone,
+    TranslationZoneMode,
+)
 from screen_translator.hotkeys.windows import DEFAULT_HOTKEY, WM_HOTKEY, WindowsGlobalHotkey
 from screen_translator.instrumentation import RuntimeMetrics
 from screen_translator.overlay.layout import OverlayItem
@@ -57,12 +63,16 @@ class FakeUser32:
 class FakeReadingPipeline:
     def __init__(self) -> None:
         self.region = ScreenRegion(10, 20, 100, 40)
+        self.zones = ()
         self.capture_calls = 0
         self.process_calls: list[CapturedImage] = []
         self.overlay_cleared = False
 
     def set_region(self, region: ScreenRegion) -> None:
         self.region = region
+
+    def set_zones(self, zones) -> None:
+        self.zones = tuple(zones)
 
     def capture_frame(self) -> CapturedImage:
         self.capture_calls += 1
@@ -71,6 +81,9 @@ class FakeReadingPipeline:
     def process_captured_frame(self, captured: CapturedImage) -> ReadingJobResult:
         self.process_calls.append(captured)
         return ReadingJobResult(items=[OverlayItem("Xin chao", captured.region)], metrics=None, had_text=True)
+
+    def process_next_frame(self) -> ReadingJobResult:
+        return self.process_captured_frame(self.capture_frame())
 
     def apply_result(self, result: ReadingJobResult) -> None:
         del result
@@ -119,6 +132,35 @@ def test_async_reading_runner_defers_capture_until_worker_executes_task() -> Non
     assert pipeline.capture_calls == 0
     result = worker.submitted[0][1]()
     assert pipeline.capture_calls == 1
+    assert result.items[0].text == "Xin chao"
+
+
+def test_async_reading_runner_can_start_with_zones() -> None:
+    worker = FakeWorker()
+    timer = FakeTimer()
+    metrics = RuntimeMetrics()
+    pipeline = FakeReadingPipeline()
+    zone = TranslationZone(
+        id="zone-1",
+        name="Dialog",
+        region=ScreenRegion(10, 20, 100, 40),
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    runner = AsyncReadingModeRunner(
+        pipeline=pipeline,
+        worker=worker,
+        timer=timer,
+        metrics=metrics,
+        interval_ms=500,
+    )
+
+    runner.start_zones((zone,))
+    runner.on_interval()
+    result = worker.submitted[0][1]()
+
+    assert pipeline.zones == (zone,)
+    assert timer.started == [500]
     assert result.items[0].text == "Xin chao"
 
 
@@ -251,6 +293,53 @@ def test_mode_controller_state_transitions_for_reading_start_stop() -> None:
     assert runner.started == [ScreenRegion(10, 20, 100, 40)]
     assert runner.stop_calls == 1
     assert runner.clear_overlay_calls == 1
+
+
+def test_mode_controller_start_reading_uses_zones_before_selected_region() -> None:
+    class Selector:
+        def select_region(self) -> ScreenRegion:
+            raise AssertionError("selector should not run when zones exist")
+
+    class Runner:
+        def __init__(self) -> None:
+            self.started_regions: list[ScreenRegion] = []
+            self.started_zones = []
+            self.stop_calls = 0
+            self.clear_overlay_calls = 0
+
+        def start(self, region: ScreenRegion) -> None:
+            self.started_regions.append(region)
+
+        def start_zones(self, zones) -> None:
+            self.started_zones.append(tuple(zones))
+
+        def stop(self) -> None:
+            self.stop_calls += 1
+
+        def clear_overlay(self) -> None:
+            self.clear_overlay_calls += 1
+
+    zone = TranslationZone(
+        id="zone-1",
+        name="Dialog",
+        region=ScreenRegion(10, 20, 100, 40),
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    runner = Runner()
+    controller = ModeController(
+        selector=Selector(),
+        reading_runner=runner,
+        gaming_hotkey_status="registered",
+        debug_mode=False,
+        settings=ControlPanelSettings.defaults().with_updates(zones=(zone,)),
+    )
+
+    assert controller.start_reading_mode() is True
+
+    assert runner.started_zones == [(zone,)]
+    assert runner.started_regions == []
+    assert controller.state == ModeState.READING_RUNNING
 
 
 def test_mode_controller_stop_reading_clears_overlay_and_logs(caplog) -> None:
@@ -395,6 +484,109 @@ def test_mode_controller_stops_reading_and_clears_overlay_before_gaming(
     assert "Reading Mode stopped because Gaming Mode started" in caplog.text
     assert "Reading overlay cleared before Gaming Mode" in caplog.text
     assert "Reading Auto-Stopped By Gaming: yes" in metrics.diagnostic_lines()
+
+
+def test_mode_controller_gaming_uses_gaming_and_both_zones_before_selected_region() -> None:
+    class Selector:
+        def select_region(self) -> ScreenRegion:
+            raise AssertionError("gaming zones should not require region selection")
+
+    class GamingPipeline:
+        def __init__(self) -> None:
+            self.region_calls: list[ScreenRegion | None] = []
+            self.zone_calls = []
+
+        def run_once(self, region: ScreenRegion | None = None) -> bool:
+            self.region_calls.append(region)
+            return True
+
+        def run_zones(self, zones) -> bool:
+            self.zone_calls.append(tuple(zones))
+            return True
+
+    reading = TranslationZone(
+        id="zone-reading",
+        name="Reading",
+        region=ScreenRegion(10, 20, 100, 40),
+        mode=TranslationZoneMode.READING,
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    both = TranslationZone(
+        id="zone-both",
+        name="Both",
+        region=ScreenRegion(200, 20, 100, 40),
+        mode=TranslationZoneMode.BOTH,
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    gaming = TranslationZone(
+        id="zone-gaming",
+        name="Gaming",
+        region=ScreenRegion(400, 20, 100, 40),
+        mode=TranslationZoneMode.GAMING,
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    pipeline = GamingPipeline()
+    controller = ModeController(
+        selector=Selector(),
+        reading_runner=None,
+        gaming_pipeline=pipeline,
+        gaming_hotkey_status="registered",
+        debug_mode=True,
+        settings=ControlPanelSettings.defaults().with_updates(zones=(reading, both, gaming)),
+    )
+
+    assert controller.run_gaming_translation_once() is True
+
+    assert pipeline.zone_calls == [(gaming, both)]
+    assert pipeline.region_calls == []
+    assert controller.last_error is None
+
+
+def test_mode_controller_gaming_falls_back_to_selected_region_without_gaming_zones() -> None:
+    class Selector:
+        def select_region(self) -> ScreenRegion:
+            raise AssertionError("stored selected region should be used")
+
+    class GamingPipeline:
+        def __init__(self) -> None:
+            self.region_calls: list[ScreenRegion | None] = []
+            self.zone_calls = []
+
+        def run_once(self, region: ScreenRegion | None = None) -> bool:
+            self.region_calls.append(region)
+            return True
+
+        def run_zones(self, zones) -> bool:
+            self.zone_calls.append(tuple(zones))
+            return True
+
+    reading = TranslationZone(
+        id="zone-reading",
+        name="Reading",
+        region=ScreenRegion(10, 20, 100, 40),
+        mode=TranslationZoneMode.READING,
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    region = ScreenRegion(50, 60, 200, 80)
+    pipeline = GamingPipeline()
+    controller = ModeController(
+        selector=Selector(),
+        reading_runner=None,
+        gaming_pipeline=pipeline,
+        gaming_hotkey_status="registered",
+        debug_mode=True,
+        settings=ControlPanelSettings.defaults().with_updates(zones=(reading,)),
+    )
+    controller.current_region = region
+
+    assert controller.run_gaming_translation_once() is True
+
+    assert pipeline.zone_calls == []
+    assert pipeline.region_calls == [region]
 
 
 def test_mode_controller_routes_user_visible_errors_without_crashing() -> None:
@@ -549,3 +741,535 @@ def test_mode_controller_save_settings_reports_restart_required_for_hotkey_chang
     assert controller.save_settings(settings) is True
 
     assert controller.status_message == "Restart required for this setting."
+
+
+def test_mode_controller_add_zone_uses_selector_and_updates_settings() -> None:
+    class Selector:
+        def select_region(self) -> ScreenRegion:
+            return ScreenRegion(10, 20, 100, 40)
+
+    controller = ModeController(
+        selector=Selector(),
+        reading_runner=None,
+        gaming_hotkey_status="registered",
+        debug_mode=False,
+        zone_id_factory=lambda: "zone-1",
+        timestamp_factory=lambda: "2026-06-04T12:00:00+00:00",
+    )
+
+    assert controller.add_zone() is True
+
+    zone = controller.settings().zones[0]
+    assert zone.id == "zone-1"
+    assert zone.name == "Zone 1"
+    assert zone.region == ScreenRegion(10, 20, 100, 40)
+    assert zone.mode == TranslationZoneMode.READING
+    assert zone.overlay_style == OverlayStyleMode.FLOATING_PANEL
+    assert zone.enabled is True
+    assert zone.visible is True
+    assert zone.translation_visible is True
+    assert zone.created_at == "2026-06-04T12:00:00+00:00"
+    assert zone.updated_at == "2026-06-04T12:00:00+00:00"
+
+
+def test_mode_controller_updates_and_deletes_zones_in_settings() -> None:
+    class Selector:
+        def select_region(self) -> None:
+            return None
+
+    zone = TranslationZone(
+        id="zone-1",
+        name="Dialog",
+        region=ScreenRegion(10, 20, 100, 40),
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    controller = ModeController(
+        selector=Selector(),
+        reading_runner=None,
+        gaming_hotkey_status="registered",
+        debug_mode=False,
+        settings=ControlPanelSettings.defaults().with_updates(zones=(zone,)),
+        timestamp_factory=lambda: "2026-06-04T12:10:00+00:00",
+    )
+
+    assert controller.rename_zone("zone-1", "Menu") is True
+    assert controller.toggle_zone_visible("zone-1") is True
+    assert controller.toggle_zone_enabled("zone-1") is True
+    assert controller.set_zone_overlay_style("zone-1", "inline_replace") is True
+
+    updated = controller.settings().zones[0]
+    assert updated.name == "Menu"
+    assert updated.visible is False
+    assert updated.enabled is False
+    assert updated.overlay_style == OverlayStyleMode.INLINE_REPLACE
+    assert updated.updated_at == "2026-06-04T12:10:00+00:00"
+
+    assert controller.delete_zone("zone-1") is True
+
+    assert controller.settings().zones == ()
+
+
+def test_mode_controller_overlay_toolbar_actions_update_and_persist_settings() -> None:
+    class Selector:
+        def __init__(self) -> None:
+            self.region = ScreenRegion(50, 60, 200, 80)
+
+        def select_region(self) -> ScreenRegion:
+            return self.region
+
+    class Store:
+        def __init__(self) -> None:
+            self.saved: list[ControlPanelSettings] = []
+
+        def save(self, settings: ControlPanelSettings) -> None:
+            self.saved.append(settings)
+
+    class ZoneOverlay:
+        def __init__(self) -> None:
+            self.callbacks = None
+            self.shown = []
+
+        def set_callbacks(self, callbacks) -> None:
+            self.callbacks = callbacks
+
+        def show_zones(self, zones, *, edit_mode: bool = False, show_borders: bool = True) -> None:
+            self.shown.append((tuple(zones), edit_mode, show_borders))
+
+        def clear(self) -> None:
+            return None
+
+    zone = TranslationZone(
+        id="zone-1",
+        name="Dialog",
+        region=ScreenRegion(10, 20, 100, 40),
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    store = Store()
+    overlay = ZoneOverlay()
+    controller = ModeController(
+        selector=Selector(),
+        reading_runner=None,
+        gaming_hotkey_status="registered",
+        debug_mode=False,
+        settings=ControlPanelSettings.defaults().with_updates(zones=(zone,)),
+        settings_store=store,
+        zone_overlay=overlay,
+        timestamp_factory=lambda: "2026-06-04T12:10:00+00:00",
+    )
+
+    assert overlay.callbacks is not None
+    assert overlay.callbacks.on_move("zone-1") is True
+    assert overlay.callbacks.on_style_change("zone-1", "inline_replace") is True
+    assert overlay.callbacks.on_mode_change("zone-1", "both") is True
+
+    updated = controller.settings().zones[0]
+    assert updated.region == ScreenRegion(50, 60, 200, 80)
+    assert updated.overlay_style == OverlayStyleMode.INLINE_REPLACE
+    assert updated.mode == TranslationZoneMode.BOTH
+    assert len(store.saved) == 3
+
+    assert overlay.callbacks.on_delete("zone-1") is True
+    assert controller.settings().zones == ()
+    assert len(store.saved) == 4
+
+
+def test_mode_controller_toggle_zone_borders_and_delete_all_zones() -> None:
+    class Selector:
+        def select_region(self) -> None:
+            return None
+
+    class ZoneOverlay:
+        def __init__(self) -> None:
+            self.shown = []
+            self.clear_calls = 0
+
+        def set_callbacks(self, callbacks) -> None:
+            self.callbacks = callbacks
+
+        def show_zones(self, zones, *, edit_mode: bool = False, show_borders: bool = True) -> None:
+            self.shown.append((tuple(zones), edit_mode, show_borders))
+
+        def clear(self) -> None:
+            self.clear_calls += 1
+
+    zone = TranslationZone(
+        id="zone-1",
+        name="Dialog",
+        region=ScreenRegion(10, 20, 100, 40),
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    overlay = ZoneOverlay()
+    controller = ModeController(
+        selector=Selector(),
+        reading_runner=None,
+        gaming_hotkey_status="registered",
+        debug_mode=False,
+        settings=ControlPanelSettings.defaults().with_updates(zones=(zone,)),
+        zone_overlay=overlay,
+    )
+
+    assert controller.toggle_zone_borders() is True
+    assert controller.settings().show_zone_borders is False
+    assert controller.edit_zones_enabled is False
+    assert overlay.clear_calls == 1
+
+    controller.edit_zones_enabled = False
+    assert controller.toggle_zone_borders() is True
+    assert controller.settings().show_zone_borders is True
+    assert controller.edit_zones_enabled is False
+    assert overlay.shown[-1][1] is False
+
+    assert controller.delete_all_zones() is True
+    assert controller.settings().zones == ()
+    assert overlay.shown[-1][0] == ()
+
+
+def test_mode_controller_diagnostics_include_zone_mode_counts() -> None:
+    class Selector:
+        def select_region(self) -> None:
+            return None
+
+    zones = (
+        TranslationZone(
+            id="zone-reading",
+            name="Reading",
+            region=ScreenRegion(10, 20, 100, 40),
+            mode=TranslationZoneMode.READING,
+            created_at="2026-06-04T12:00:00+00:00",
+            updated_at="2026-06-04T12:00:00+00:00",
+        ),
+        TranslationZone(
+            id="zone-gaming",
+            name="Gaming",
+            region=ScreenRegion(200, 20, 100, 40),
+            mode=TranslationZoneMode.GAMING,
+            created_at="2026-06-04T12:00:00+00:00",
+            updated_at="2026-06-04T12:00:00+00:00",
+        ),
+        TranslationZone(
+            id="zone-both",
+            name="Both",
+            region=ScreenRegion(400, 20, 100, 40),
+            mode=TranslationZoneMode.BOTH,
+            created_at="2026-06-04T12:00:00+00:00",
+            updated_at="2026-06-04T12:00:00+00:00",
+        ),
+    )
+    controller = ModeController(
+        selector=Selector(),
+        reading_runner=None,
+        gaming_hotkey_status="registered",
+        debug_mode=False,
+        settings=ControlPanelSettings.defaults().with_updates(zones=zones),
+    )
+
+    assert controller.diagnostic_lines()[-3:] == [
+        "Reading Zones: 1",
+        "Gaming Zones: 1",
+        "Both Zones: 1",
+    ]
+
+
+def test_mode_controller_refreshes_zone_overlay_when_zone_visibility_changes() -> None:
+    class Selector:
+        def select_region(self) -> ScreenRegion:
+            return ScreenRegion(10, 20, 100, 40)
+
+    class ZoneOverlay:
+        def __init__(self) -> None:
+            self.shown = []
+            self.clear_calls = 0
+
+        def show_zones(self, zones, *, edit_mode: bool = False, show_borders: bool = True) -> None:
+            self.shown.append((tuple(zones), edit_mode, show_borders))
+
+        def clear(self) -> None:
+            self.clear_calls += 1
+
+    overlay = ZoneOverlay()
+    zone = TranslationZone(
+        id="zone-1",
+        name="Dialog",
+        region=ScreenRegion(10, 20, 100, 40),
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    controller = ModeController(
+        selector=Selector(),
+        reading_runner=None,
+        gaming_hotkey_status="registered",
+        debug_mode=False,
+        zone_overlay=overlay,
+        settings=ControlPanelSettings.defaults().with_updates(zones=(zone,)),
+    )
+
+    assert controller.toggle_zone_visible("zone-1") is True
+
+    assert overlay.shown[-1][0][0].visible is False
+    assert overlay.shown[-1][1] is False
+    assert overlay.shown[-1][2] is True
+    assert overlay.clear_calls == 0
+
+
+def test_mode_controller_show_and_hide_all_zones_updates_border_overlay() -> None:
+    class Selector:
+        def select_region(self) -> None:
+            return None
+
+    class ZoneOverlay:
+        def __init__(self) -> None:
+            self.shown = []
+
+        def show_zones(self, zones, *, edit_mode: bool = False, show_borders: bool = True) -> None:
+            self.shown.append((tuple(zones), edit_mode, show_borders))
+
+        def clear(self) -> None:
+            raise AssertionError("show/hide all should keep the border window available")
+
+    zones = (
+        TranslationZone(
+            id="zone-1",
+            name="Dialog",
+            region=ScreenRegion(10, 20, 100, 40),
+            visible=False,
+            created_at="2026-06-04T12:00:00+00:00",
+            updated_at="2026-06-04T12:00:00+00:00",
+        ),
+        TranslationZone(
+            id="zone-2",
+            name="Menu",
+            region=ScreenRegion(200, 20, 100, 40),
+            created_at="2026-06-04T12:00:00+00:00",
+            updated_at="2026-06-04T12:00:00+00:00",
+        ),
+    )
+    overlay = ZoneOverlay()
+    controller = ModeController(
+        selector=Selector(),
+        reading_runner=None,
+        gaming_hotkey_status="registered",
+        debug_mode=False,
+        zone_overlay=overlay,
+        settings=ControlPanelSettings.defaults().with_updates(zones=zones),
+        timestamp_factory=lambda: "2026-06-04T12:10:00+00:00",
+    )
+
+    assert controller.show_all_zones() is True
+    assert all(zone.visible for zone in controller.settings().zones)
+    assert all(zone.visible for zone in overlay.shown[-1][0])
+
+    assert controller.hide_all_zones() is True
+    assert not any(zone.visible for zone in controller.settings().zones)
+    assert not any(zone.visible for zone in overlay.shown[-1][0])
+
+
+def test_mode_controller_can_clear_zone_border_overlay() -> None:
+    class Selector:
+        def select_region(self) -> None:
+            return None
+
+    class ZoneOverlay:
+        def __init__(self) -> None:
+            self.clear_calls = 0
+
+        def show_zones(self, zones, *, edit_mode: bool = False, show_borders: bool = True) -> None:
+            del zones, edit_mode, show_borders
+
+        def clear(self) -> None:
+            self.clear_calls += 1
+
+    overlay = ZoneOverlay()
+    controller = ModeController(
+        selector=Selector(),
+        reading_runner=None,
+        gaming_hotkey_status="registered",
+        debug_mode=False,
+        zone_overlay=overlay,
+    )
+
+    assert controller.clear_zone_borders() is True
+
+    assert overlay.clear_calls == 1
+
+
+def test_mode_controller_save_settings_hides_border_overlay_when_borders_disabled() -> None:
+    class Selector:
+        def select_region(self) -> None:
+            return None
+
+    class ZoneOverlay:
+        def __init__(self) -> None:
+            self.shown = []
+            self.clear_calls = 0
+
+        def show_zones(self, zones, *, edit_mode: bool = False, show_borders: bool = True) -> None:
+            self.shown.append((tuple(zones), edit_mode, show_borders))
+
+        def clear(self) -> None:
+            self.clear_calls += 1
+
+    overlay = ZoneOverlay()
+    zone = TranslationZone(
+        id="zone-1",
+        name="Dialog",
+        region=ScreenRegion(10, 20, 100, 40),
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    controller = ModeController(
+        selector=Selector(),
+        reading_runner=None,
+        gaming_hotkey_status="registered",
+        debug_mode=False,
+        zone_overlay=overlay,
+        settings=ControlPanelSettings.defaults().with_updates(zones=(zone,)),
+    )
+
+    assert controller.save_settings(
+        controller.settings().with_updates(show_zone_borders=False)
+    ) is True
+
+    assert overlay.clear_calls == 1
+    assert overlay.shown == []
+
+
+def test_mode_controller_edit_zones_mode_refreshes_overlay_interactive() -> None:
+    class Selector:
+        def select_region(self) -> None:
+            return None
+
+    class ZoneOverlay:
+        def __init__(self) -> None:
+            self.shown = []
+
+        def show_zones(self, zones, *, edit_mode: bool = False, show_borders: bool = True) -> None:
+            self.shown.append((tuple(zones), edit_mode, show_borders))
+
+        def clear(self) -> None:
+            raise AssertionError("edit mode should refresh, not clear")
+
+    zone = TranslationZone(
+        id="zone-1",
+        name="Dialog",
+        region=ScreenRegion(10, 20, 100, 40),
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    overlay = ZoneOverlay()
+    controller = ModeController(
+        selector=Selector(),
+        reading_runner=None,
+        gaming_hotkey_status="registered",
+        debug_mode=False,
+        zone_overlay=overlay,
+        settings=ControlPanelSettings.defaults().with_updates(zones=(zone,)),
+    )
+
+    assert controller.set_edit_zones_enabled(True) is True
+
+    assert overlay.shown[-1][1] is True
+    assert controller.status_message == "Edit Zones enabled"
+
+
+def test_mode_controller_edit_zone_position_uses_region_selector() -> None:
+    class Selector:
+        def select_region(self) -> ScreenRegion:
+            return ScreenRegion(50, 60, 200, 80)
+
+    zone = TranslationZone(
+        id="zone-1",
+        name="Dialog",
+        region=ScreenRegion(10, 20, 100, 40),
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    controller = ModeController(
+        selector=Selector(),
+        reading_runner=None,
+        gaming_hotkey_status="registered",
+        debug_mode=False,
+        settings=ControlPanelSettings.defaults().with_updates(zones=(zone,)),
+        timestamp_factory=lambda: "2026-06-04T12:10:00+00:00",
+    )
+
+    assert controller.edit_zone_position("zone-1") is True
+
+    updated = controller.settings().zones[0]
+    assert updated.region == ScreenRegion(50, 60, 200, 80)
+    assert updated.updated_at == "2026-06-04T12:10:00+00:00"
+
+
+def test_mode_controller_clear_all_translations_clears_reading_overlay() -> None:
+    class Selector:
+        def select_region(self) -> None:
+            return None
+
+    class Runner:
+        def __init__(self) -> None:
+            self.clear_overlay_calls = 0
+
+        def clear_overlay(self) -> None:
+            self.clear_overlay_calls += 1
+
+    runner = Runner()
+    controller = ModeController(
+        selector=Selector(),
+        reading_runner=runner,
+        gaming_hotkey_status="registered",
+        debug_mode=False,
+    )
+
+    assert controller.clear_all_translations() is True
+
+    assert runner.clear_overlay_calls == 1
+    assert controller.status_message == "Translations cleared"
+
+
+def test_mode_controller_delete_zone_clears_reading_overlay_and_removes_border() -> None:
+    class Selector:
+        def select_region(self) -> None:
+            return None
+
+    class Runner:
+        def __init__(self) -> None:
+            self.clear_overlay_calls = 0
+
+        def clear_overlay(self) -> None:
+            self.clear_overlay_calls += 1
+
+    class ZoneOverlay:
+        def __init__(self) -> None:
+            self.shown = []
+
+        def show_zones(self, zones, *, edit_mode: bool = False, show_borders: bool = True) -> None:
+            self.shown.append((tuple(zones), edit_mode, show_borders))
+
+        def clear(self) -> None:
+            raise AssertionError("delete should refresh with remaining zones")
+
+    runner = Runner()
+    overlay = ZoneOverlay()
+    zone = TranslationZone(
+        id="zone-1",
+        name="Dialog",
+        region=ScreenRegion(10, 20, 100, 40),
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    controller = ModeController(
+        selector=Selector(),
+        reading_runner=runner,
+        gaming_hotkey_status="registered",
+        debug_mode=False,
+        zone_overlay=overlay,
+        settings=ControlPanelSettings.defaults().with_updates(zones=(zone,)),
+    )
+
+    assert controller.delete_zone("zone-1") is True
+
+    assert controller.settings().zones == ()
+    assert overlay.shown[-1][0] == ()
+    assert runner.clear_overlay_calls == 1

@@ -78,8 +78,8 @@ $env:SCREEN_TRANSLATOR_DEBUG_OVERLAY = "true"
 Gaming overlay settings:
 
 ```powershell
-# Auto-hide timeout for one-shot Gaming Mode overlays.
-$env:SCREEN_TRANSLATOR_GAMING_OVERLAY_TTL_MS = "5000"
+# Auto-hide timeout for one-shot Gaming Mode overlays. 0 keeps panels until dismissed.
+$env:SCREEN_TRANSLATOR_GAMING_OVERLAY_TTL_MS = "0"
 
 # Reuse OCR results for an unchanged Gaming Mode region within this TTL.
 $env:SCREEN_TRANSLATOR_GAMING_OCR_CACHE_TTL_MS = "10000"
@@ -111,7 +111,7 @@ $env:SCREEN_TRANSLATOR_READING_MISSING_TIMEOUT_MS = "2000"
 $env:SCREEN_TRANSLATOR_READING_MIN_CONFIDENCE = "0.5"
 ```
 
-With `$env:SCREEN_TRANSLATOR_DEBUG = "true"`, Reading Mode logs the latest timing values and rolling averages over the last 10 and last 100 processed frames. Gaming Mode logs hotkey press time, overlay shown time, total response time, translation unit count, translation request count, `gaming_ocr_cache_hit` or `gaming_ocr_cache_miss`, and `image_fingerprint`. Logs and the debug overlay warn when total pipeline time, OCR time, or translation time exceed 2000 ms.
+With `$env:SCREEN_TRANSLATOR_DEBUG = "true"`, Reading Mode logs the latest timing values and rolling averages over the last 10 and last 100 processed frames. Reading Mode and Gaming Mode temporarily hide app-owned overlays before OCR capture and restore them immediately after capture; logs include `capture_without_overlays=true`, `overlays hidden before capture`, and `overlays restored after capture`. Gaming Mode logs hotkey press time, overlay shown time, total response time, translation unit count, translation request count, `gaming_ocr_cache_hit` or `gaming_ocr_cache_miss`, and `image_fingerprint`. Logs and the debug overlay warn when total pipeline time, OCR time, or translation time exceed 2000 ms.
 
 ## Running the Server
 
@@ -288,6 +288,14 @@ Mode transition smoke:
 - Expected: logs include `Reading overlay cleared by Stop Reading Mode` and all Reading panels disappear.
 - Press `Esc` while a Gaming overlay is visible.
 - Expected: logs include `gaming overlay dismissed by hotkey`, the Gaming overlay disappears, and Reading Mode state is not changed by that dismiss key.
+- With `SCREEN_TRANSLATOR_GAMING_OVERLAY_TTL_MS=0`, wait several seconds before pressing `Esc`.
+- Expected: the Gaming overlay remains visible until the dismiss hotkey or Clear Gaming Overlay is used.
+
+Inline replacement capture smoke:
+
+- Create an `inline_replace` Reading zone over English text.
+- Start Reading Mode and let it run for several ticks.
+- Expected: logs include `capture_without_overlays=true`, `overlays hidden before capture`, and `overlays restored after capture`; OCR keeps reading the original English source, not the translated Vietnamese overlay.
 
 Gaming OCR cache smoke:
 
@@ -296,7 +304,7 @@ Gaming OCR cache smoke:
 - Change the selected region or the visible source image.
 - Expected: the next run logs `gaming_ocr_cache_miss`.
 
-After warm-up, Gaming Mode should target less than 1000 ms from `Ctrl+Shift+T` to overlay shown on a small unchanged text region, especially after a Gaming OCR cache hit. Long paragraphs may exceed that target with OCR and unofficial web translation, but panels should replace old Gaming Mode panels, auto-hide after the TTL, wrap long text, avoid overlap, and leave the screen fully visible outside panel rectangles. Reading Mode should remain stable during a long-running selected region and should skip OCR when frame change stays below `SCREEN_TRANSLATOR_READING_CHANGE_THRESHOLD`.
+After warm-up, Gaming Mode should target less than 1000 ms from `Ctrl+Shift+T` to overlay shown on a small unchanged text region, especially after a Gaming OCR cache hit. Long paragraphs may exceed that target with OCR and unofficial web translation, but panels should replace old Gaming Mode panels, remain visible until dismissed when TTL is 0, wrap long text, avoid overlap, and leave the screen fully visible outside panel rectangles. Reading Mode should remain stable during a long-running selected region and should skip OCR when frame change stays below `SCREEN_TRANSLATOR_READING_CHANGE_THRESHOLD`.
 
 ## Logs
 

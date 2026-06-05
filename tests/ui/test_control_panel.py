@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 from ctypes import wintypes
 
+from screen_translator.domain.models import OverlayStyleMode, ScreenRegion, TranslationZone
 from screen_translator.hotkeys.windows import DEFAULT_HOTKEY, WM_HOTKEY
 from screen_translator.ui.settings import ControlPanelSettings
 from screen_translator.ui.control_panel import (
@@ -50,6 +51,73 @@ class FakeController:
         self.current_region = None
         return True
 
+    def zones(self) -> tuple[TranslationZone, ...]:
+        return self._settings.zones
+
+    def add_zone(self) -> bool:
+        self.calls.append("add_zone")
+        return True
+
+    def delete_zone(self, zone_id: str) -> bool:
+        self.calls.append(f"delete_zone:{zone_id}")
+        self._settings = self._settings.with_updates(
+            zones=tuple(zone for zone in self._settings.zones if zone.id != zone_id)
+        )
+        return True
+
+    def rename_zone(self, zone_id: str, name: str) -> bool:
+        self.calls.append(f"rename_zone:{zone_id}:{name}")
+        return True
+
+    def toggle_zone_visible(self, zone_id: str) -> bool:
+        self.calls.append(f"toggle_zone_visible:{zone_id}")
+        return True
+
+    def toggle_zone_enabled(self, zone_id: str) -> bool:
+        self.calls.append(f"toggle_zone_enabled:{zone_id}")
+        return True
+
+    def set_zone_overlay_style(self, zone_id: str, style: str) -> bool:
+        self.calls.append(f"set_zone_overlay_style:{zone_id}:{style}")
+        return True
+
+    def set_zone_mode(self, zone_id: str, mode: str) -> bool:
+        self.calls.append(f"set_zone_mode:{zone_id}:{mode}")
+        return True
+
+    def edit_zone_position(self, zone_id: str) -> bool:
+        self.calls.append(f"edit_zone_position:{zone_id}")
+        return True
+
+    def show_all_zones(self) -> bool:
+        self.calls.append("show_all_zones")
+        return True
+
+    def hide_all_zones(self) -> bool:
+        self.calls.append("hide_all_zones")
+        return True
+
+    def clear_zone_borders(self) -> bool:
+        self.calls.append("clear_zone_borders")
+        return True
+
+    def toggle_zone_borders(self) -> bool:
+        self.calls.append("toggle_zone_borders")
+        return True
+
+    def delete_all_zones(self) -> bool:
+        self.calls.append("delete_all_zones")
+        self._settings = self._settings.with_updates(zones=())
+        return True
+
+    def set_edit_zones_enabled(self, enabled: bool) -> bool:
+        self.calls.append(f"set_edit_zones_enabled:{enabled}")
+        return True
+
+    def clear_all_translations(self) -> bool:
+        self.calls.append("clear_all_translations")
+        return True
+
     def settings(self) -> ControlPanelSettings:
         return self._settings
 
@@ -92,6 +160,10 @@ class FakeController:
         self.gaming_dismiss_hotkey_status = "failed"
         self.last_error = str(error)
 
+    def report_error(self, error: Exception | str) -> None:
+        self.last_error = str(error)
+        self.status_message = "Error"
+
     def diagnostic_lines(self) -> list[str]:
         return []
 
@@ -125,6 +197,21 @@ def test_control_panel_presenter_routes_ui_actions_through_controller() -> None:
     assert presenter.status_text() == "Ready - Server stopped"
 
 
+def test_control_panel_presenter_routes_zone_actions() -> None:
+    controller = FakeController()
+    presenter = ControlPanelPresenter(controller)
+
+    presenter.add_zone()
+    presenter.toggle_zone_borders()
+    presenter.delete_all_zones()
+
+    assert controller.calls == [
+        "add_zone",
+        "toggle_zone_borders",
+        "delete_all_zones",
+    ]
+
+
 def test_control_panel_presenter_shows_last_error() -> None:
     controller = FakeController()
     controller.last_error = "Select a region before running Gaming Mode"
@@ -147,22 +234,24 @@ def test_control_panel_presenter_shows_runtime_diagnostics() -> None:
                 "Translation Count: 2",
                 "Cache Hits: 1",
                 "Cache Misses: 1",
+                "Gaming OCR Cache Hits: 4",
+                "Gaming OCR Cache Misses: 5",
                 "Average Latency (10): 420.00 ms",
+                "Reading Zones: 2",
+                "Gaming Zones: 1",
+                "Both Zones: 1",
             ]
 
     presenter = ControlPanelPresenter(ControllerWithDiagnostics())
 
-    assert presenter.status_lines() == [
-        "Gaming Hotkey: registered",
-        "Gaming Dismiss Hotkey: Esc (registered)",
-        "Last Hotkey: never",
-        "Debug: on",
-        "OCR Count: 3",
-        "Translation Count: 2",
-        "Cache Hits: 1",
-        "Cache Misses: 1",
-        "Average Latency (10): 420.00 ms",
-    ]
+    assert presenter.diagnostic_groups() == {
+        "Translation": ["Translation Count: 2", "Cache Hits: 1", "Cache Misses: 1"],
+        "OCR": ["OCR Count: 3"],
+        "Gaming": ["Gaming OCR Cache Hits: 4", "Gaming OCR Cache Misses: 5"],
+        "Latency": ["Average Latency (10): 420.00 ms"],
+        "Zones": ["Reading Zones: 2", "Gaming Zones: 1", "Both Zones: 1"],
+        "General": [],
+    }
 
 
 def test_control_panel_presenter_formats_selected_region() -> None:
@@ -177,24 +266,40 @@ def test_control_panel_presenter_formats_selected_region() -> None:
     assert presenter.region_text() == "x=10 y=20 width=300 height=120"
 
 
-def test_control_panel_fallback_button_triggers_gaming_translation_once() -> None:
+def test_control_panel_uses_phase_h_tabs_only() -> None:
     controller = FakeController()
     presenter = ControlPanelPresenter(controller)
     window = _build_window(FakeQtWidgets, presenter)
 
-    window.buttons["Run Gaming Translation Once"].click()
+    assert [title for _widget, title in window.tabs] == [
+        "Zones",
+        "Translation",
+        "Hotkeys",
+        "Advanced",
+    ]
+    assert "Region" not in [title for _widget, title in window.tabs]
+    assert "Gaming Mode" not in [title for _widget, title in window.tabs]
+    assert "Reading Mode" not in [title for _widget, title in window.tabs]
+    assert "Overlay" not in [title for _widget, title in window.tabs]
+    assert "Diagnostics" not in [title for _widget, title in window.tabs]
+    assert "Run Gaming Translation Once" not in window.buttons
+    assert "Clear Gaming Overlay" not in window.buttons
+    assert "Select Region" not in window.buttons
 
-    assert controller.calls == ["run_gaming_translation_once"]
 
-
-def test_control_panel_clear_gaming_overlay_button_works() -> None:
+def test_control_panel_translation_tab_contains_translation_and_overlay_settings() -> None:
     controller = FakeController()
     presenter = ControlPanelPresenter(controller)
     window = _build_window(FakeQtWidgets, presenter)
 
-    window.buttons["Clear Gaming Overlay"].click()
-
-    assert controller.calls == ["clear_gaming_overlay"]
+    assert "Provider" in window.combos
+    assert "Source Language" in window.combos
+    assert "Target Language" in window.combos
+    assert "Server URL" in window.fields
+    assert "Overlay Font Size" in window.spinboxes
+    assert "Panel Opacity" in window.spinboxes
+    assert "Overlay Max Width" in window.spinboxes
+    assert "Debug Overlay" in window.checkboxes
 
 
 def test_control_panel_provider_dropdown_values() -> None:
@@ -208,11 +313,20 @@ def test_control_panel_provider_dropdown_values() -> None:
 
 def test_control_panel_save_settings_reads_fields_and_updates_controller() -> None:
     controller = FakeController()
+    zone = TranslationZone(
+        id="zone-1",
+        name="Dialog",
+        region=ScreenRegion(10, 20, 300, 120),
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    controller._settings = controller._settings.with_updates(zones=(zone,))
     presenter = ControlPanelPresenter(controller)
     window = _build_window(FakeQtWidgets, presenter)
     window.combos["Provider"].setCurrentText("googletrans")
     window.fields["Target Language"].setText("vi")
-    window.spinboxes["Overlay TTL ms"].setValue(2222)
+    window.hotkey_recorders["Gaming Hotkey"].record_key("T", modifiers=("Ctrl", "Shift"))
+    window.hotkey_recorders["Gaming Dismiss Hotkey"].record_key("Escape")
     window.checkboxes["Debug Overlay"].setChecked(True)
 
     window.buttons["Save Settings"].click()
@@ -221,8 +335,100 @@ def test_control_panel_save_settings_reads_fields_and_updates_controller() -> No
     assert controller.settings().translation_provider == "googletrans"
     assert controller.settings().to_config().translation_provider == "googletrans"
     assert controller.settings().target_language == "vi"
-    assert controller.settings().gaming_overlay_ttl_ms == 2222
+    assert controller.settings().gaming_hotkey == "Ctrl+Shift+T"
+    assert controller.settings().gaming_dismiss_hotkey == "Esc"
     assert controller.settings().debug_overlay_enabled is True
+    assert controller.settings().zones == (zone,)
+
+
+def test_control_panel_hotkey_recorder_rejects_duplicate_hotkeys() -> None:
+    controller = FakeController()
+    presenter = ControlPanelPresenter(controller)
+    window = _build_window(FakeQtWidgets, presenter)
+
+    window.hotkey_recorders["Gaming Dismiss Hotkey"].record_key("T", modifiers=("Ctrl", "Shift"))
+
+    assert window.fields["Gaming Dismiss Hotkey"].text() == "Esc"
+    assert controller.last_error == "Gaming Dismiss Hotkey duplicates Gaming Hotkey"
+
+
+def test_control_panel_hotkey_recorder_formats_single_key_and_function_key() -> None:
+    controller = FakeController()
+    presenter = ControlPanelPresenter(controller)
+    window = _build_window(FakeQtWidgets, presenter)
+
+    window.hotkey_recorders["Gaming Dismiss Hotkey"].record_key("Q")
+    window.hotkey_recorders["Gaming Hotkey"].record_key("F1", modifiers=("Shift",))
+
+    assert window.fields["Gaming Dismiss Hotkey"].text() == "Q"
+    assert window.fields["Gaming Hotkey"].text() == "Shift + F1"
+
+
+def test_control_panel_zones_tab_is_simplified_and_routes_global_zone_buttons() -> None:
+    controller = FakeController()
+    controller._settings = ControlPanelSettings.defaults().with_updates(
+        zones=(
+            TranslationZone(
+                id="zone-1",
+                name="Dialog",
+                region=ScreenRegion(10, 20, 300, 120),
+                overlay_style=OverlayStyleMode.INLINE_REPLACE,
+                created_at="2026-06-04T12:00:00+00:00",
+                updated_at="2026-06-04T12:00:00+00:00",
+            ),
+        )
+    )
+    presenter = ControlPanelPresenter(controller)
+    window = _build_window(FakeQtWidgets, presenter)
+
+    assert any(title == "Zones" for _widget, title in window.tabs)
+    assert window.tables["Zones"].rows[0] == [
+        "Dialog",
+        "10",
+        "20",
+        "300",
+        "120",
+        "yes",
+        "inline_replace",
+        "reading",
+    ]
+
+    window.buttons["Add Zone"].click()
+    window.buttons["Show Zones / Hide Zones"].click()
+    window.checkboxes["Edit Zones"].click()
+    window.checkboxes["Edit Zones"].click()
+    window.buttons["Delete All Zones"].click()
+
+    assert "add_zone" in controller.calls
+    assert "toggle_zone_borders" in controller.calls
+    assert "set_edit_zones_enabled:True" in controller.calls
+    assert "set_edit_zones_enabled:False" in controller.calls
+    assert "delete_all_zones" in controller.calls
+    for removed in (
+        "Delete Zone",
+        "Rename Zone",
+        "Show/Hide Zone",
+        "Enable/Disable Translation",
+        "Set Zone Style",
+        "Edit Zone Position",
+        "Show All Zones",
+        "Hide All Zones",
+        "Clear Zone Borders",
+        "Clear All Translations",
+    ):
+        assert removed not in window.buttons
+    assert "Zone Name" not in window.fields
+    assert "Zone Style" not in window.combos
+    assert "Edit Zones" in window.checkboxes
+
+
+def test_control_panel_has_single_global_save_and_reset_buttons() -> None:
+    controller = FakeController()
+    presenter = ControlPanelPresenter(controller)
+    window = _build_window(FakeQtWidgets, presenter)
+
+    assert window.button_texts.count("Save Settings") == 1
+    assert window.button_texts.count("Reset Default Settings") == 1
 
 
 def test_control_panel_reset_settings_button_works() -> None:
@@ -246,6 +452,28 @@ def test_control_panel_server_buttons_work() -> None:
 
     assert controller.calls == ["start_local_server", "stop_local_server"]
     assert "Server stopped" in window.status_bar.text
+
+
+def test_control_panel_advanced_tab_exposes_grouped_diagnostics() -> None:
+    class ControllerWithDiagnostics(FakeController):
+        def diagnostic_lines(self) -> list[str]:
+            return [
+                "Cache Hits: 3",
+                "Cache Misses: 2",
+                "OCR Count: 5",
+                "Gaming OCR Cache Hits: 1",
+                "Latest Latency: 36.00 ms",
+                "Reading Zones: 2",
+            ]
+
+    presenter = ControlPanelPresenter(ControllerWithDiagnostics())
+    window = _build_window(FakeQtWidgets, presenter)
+
+    assert window.diagnostic_groups["Translation"] == ["Cache Hits: 3", "Cache Misses: 2"]
+    assert window.diagnostic_groups["OCR"] == ["OCR Count: 5"]
+    assert window.diagnostic_groups["Gaming"] == ["Gaming OCR Cache Hits: 1"]
+    assert window.diagnostic_groups["Latency"] == ["Latest Latency: 36.00 ms"]
+    assert window.diagnostic_groups["Zones"] == ["Reading Zones: 2"]
 
 
 def test_control_panel_native_event_filter_dispatches_hotkey_message() -> None:
@@ -287,9 +515,9 @@ class _Signal:
     def connect(self, callback) -> None:
         self._callback = callback
 
-    def emit(self) -> None:
+    def emit(self, *args) -> None:
         assert self._callback is not None
-        self._callback()
+        self._callback(*args)
 
 
 class _Widget:
@@ -301,6 +529,10 @@ class _Widget:
         self.spinboxes = {}
         self.double_spinboxes = {}
         self.checkboxes = {}
+        self.tables = {}
+        self.button_texts = []
+        self.hotkey_recorders = {}
+        self.diagnostic_groups = {}
         self.status_bar = None
         self.tabs = []
 
@@ -331,6 +563,7 @@ class _Layout:
             return
         if isinstance(widget, _Button):
             self.window.buttons[widget.text] = widget
+            self.window.button_texts.append(widget.text)
         if isinstance(widget, _ComboBox) and widget.label:
             self.window.combos[widget.label] = widget
         if isinstance(widget, _LineEdit) and widget.label:
@@ -341,6 +574,8 @@ class _Layout:
             self.window.double_spinboxes[widget.label] = widget
         if isinstance(widget, _CheckBox):
             self.window.checkboxes[widget.text] = widget
+        if isinstance(widget, _TableWidget) and widget.label:
+            self.window.tables[widget.label] = widget
         if getattr(widget, "is_status_bar", False):
             self.window.status_bar = widget
 
@@ -349,6 +584,12 @@ class _Button:
     def __init__(self, text: str) -> None:
         self.text = text
         self.clicked = _Signal()
+
+    def setText(self, text: str) -> None:
+        self.text = text
+
+    def setFocus(self) -> None:
+        self.focused = True
 
     def click(self) -> None:
         self.clicked.emit()
@@ -399,6 +640,9 @@ class _LineEdit:
     def text(self) -> str:
         return self.text_value
 
+    def setReadOnly(self, enabled: bool) -> None:
+        self.read_only = enabled
+
 
 class _SpinBox:
     def __init__(self) -> None:
@@ -433,12 +677,50 @@ class _CheckBox:
     def __init__(self, text: str) -> None:
         self.text = text
         self.checked = False
+        self.toggled = _Signal()
 
     def setChecked(self, checked: bool) -> None:
         self.checked = checked
 
     def isChecked(self) -> bool:
         return self.checked
+
+    def click(self) -> None:
+        self.checked = not self.checked
+        self.toggled.emit(self.checked)
+
+
+class _TableWidget:
+    def __init__(self, *args) -> None:
+        del args
+        self.label = ""
+        self.rows: list[list[str]] = []
+        self.headers: list[str] = []
+        self.current_row = 0
+        self.column_count = 0
+
+    def setColumnCount(self, count: int) -> None:
+        self.column_count = count
+
+    def setHorizontalHeaderLabels(self, labels) -> None:
+        self.headers = list(labels)
+
+    def setRowCount(self, count: int) -> None:
+        self.rows = [["" for _ in range(self.column_count)] for _ in range(count)]
+
+    def setItem(self, row: int, column: int, item) -> None:
+        self.rows[row][column] = item.text
+
+    def currentRow(self) -> int:
+        return self.current_row
+
+    def selectRow(self, row: int) -> None:
+        self.current_row = row
+
+
+class _TableWidgetItem:
+    def __init__(self, text: str) -> None:
+        self.text = text
 
 
 class FakeQtWidgets:
@@ -455,3 +737,5 @@ class FakeQtWidgets:
     QSpinBox = _SpinBox
     QDoubleSpinBox = _DoubleSpinBox
     QCheckBox = _CheckBox
+    QTableWidget = _TableWidget
+    QTableWidgetItem = _TableWidgetItem

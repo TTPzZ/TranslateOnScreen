@@ -5,6 +5,7 @@ import sys
 import traceback
 
 from screen_translator.cache.sqlite_cache import SQLiteTranslationCache
+from screen_translator.capture.overlay_guard import OverlayCaptureGuard
 from screen_translator.capture.qt_capture import QtScreenCapture
 from screen_translator.config import AppConfig
 from screen_translator.controller.mode_controller import ModeController
@@ -20,6 +21,7 @@ from screen_translator.logging_config import configure_logging
 from screen_translator.ocr.paddle_provider import PaddleOcrProvider
 from screen_translator.overlay.layout import OverlayStyle
 from screen_translator.overlay.window import BlurOverlayWindow
+from screen_translator.overlay.zones import ZoneOverlayWindow
 from screen_translator.reading.async_pipeline import AsyncReadingModeRunner
 from screen_translator.reading.pipeline import ReadingModePipeline
 from screen_translator.region.selector import QtRegionSelector
@@ -28,6 +30,7 @@ from screen_translator.ui.control_panel import ControlPanelWindow
 from screen_translator.ui.server_process import LocalServerController
 from screen_translator.ui.settings import ControlPanelSettings, SettingsStore
 from screen_translator.worker.pyqt import PyQtWorker
+from screen_translator.worker.qt_dispatcher import QtUiThreadDispatcher
 from screen_translator.worker.pyqt_timer import PyQtTimer
 
 logger = logging.getLogger(__name__)
@@ -47,6 +50,12 @@ def build_control_panel(config: AppConfig | None = None) -> ControlPanelWindow:
     translation_client = HttpTranslationClient(runtime_config.translation_server_url)
     reading_overlay = BlurOverlayWindow(style=_overlay_style_from_config(runtime_config))
     gaming_overlay = BlurOverlayWindow(style=_overlay_style_from_config(runtime_config))
+    zone_overlay = ZoneOverlayWindow()
+    capture_guard = OverlayCaptureGuard(
+        [reading_overlay, gaming_overlay, zone_overlay],
+        ui_dispatcher=QtUiThreadDispatcher(),
+        timeout_ms=1000,
+    )
     pipeline = ReadingModePipeline(
         selector=selector,
         capture=capture,
@@ -56,7 +65,9 @@ def build_control_panel(config: AppConfig | None = None) -> ControlPanelWindow:
         overlay=reading_overlay,
         config=runtime_config,
         runtime_metrics=metrics,
+        capture_guard=capture_guard,
     )
+    pipeline.set_zones(settings.zones)
     gaming_pipeline = GamingModePipeline(
         selector=selector,
         capture=capture,
@@ -66,6 +77,7 @@ def build_control_panel(config: AppConfig | None = None) -> ControlPanelWindow:
         overlay=gaming_overlay,
         config=runtime_config,
         runtime_metrics=metrics,
+        capture_guard=capture_guard,
     )
     runner_holder: dict[str, AsyncReadingModeRunner] = {}
     timer = PyQtTimer(lambda: runner_holder["runner"].on_interval())
@@ -83,6 +95,7 @@ def build_control_panel(config: AppConfig | None = None) -> ControlPanelWindow:
         next_config = new_settings.to_config(config_holder["config"])
         next_client = HttpTranslationClient(next_config.translation_server_url)
         pipeline.update_config(next_config, translation_client=next_client)
+        pipeline.set_zones(new_settings.zones)
         gaming_pipeline.update_config(next_config, translation_client=next_client)
         runner.set_interval_ms(next_config.reading_interval_ms)
         style = _overlay_style_from_config(next_config)
@@ -103,6 +116,7 @@ def build_control_panel(config: AppConfig | None = None) -> ControlPanelWindow:
         settings_store=settings_store,
         server_controller=LocalServerController(),
         runtime_settings_applier=apply_runtime_settings,
+        zone_overlay=zone_overlay,
     )
     try:
         hotkey_spec = hotkey_spec_from_text(runtime_config.gaming_hotkey, identifier=1)

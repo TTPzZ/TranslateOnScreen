@@ -3,12 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from time import perf_counter
 from typing import Any, Protocol
 
 from screen_translator.cache.sqlite_cache import SQLiteTranslationCache
+from screen_translator.capture.overlay_guard import NoopOverlayCaptureGuard, OverlayCaptureGuard
 from screen_translator.capture.qt_capture import QtScreenCapture
 from screen_translator.config import AppConfig
 from screen_translator.domain.models import (
@@ -17,6 +18,7 @@ from screen_translator.domain.models import (
     ScreenRegion,
     TranslationRequest,
     TranslationResult,
+    TranslationZone,
 )
 from screen_translator.hotkeys.windows import WindowsGlobalHotkey
 from screen_translator.instrumentation import PipelineTimings, RuntimeMetrics
@@ -77,6 +79,15 @@ class Overlay(Protocol):
         """Clear overlay items after a timeout when supported."""
 
 
+class CaptureGuard(Protocol):
+    def hidden_for_capture(
+        self,
+        *,
+        capture_regions: Sequence[ScreenRegion] | None = None,
+    ) -> object:
+        """Return a context manager that hides overlays during capture."""
+
+
 class GamingModePipeline:
     """Single-shot gaming mode pipeline: select, capture, OCR, translate, overlay."""
 
@@ -93,6 +104,7 @@ class GamingModePipeline:
         clock: Callable[[], float] = perf_counter,
         runtime_metrics: RuntimeMetrics | None = None,
         block_merger: OcrBlockMerger | None = None,
+        capture_guard: CaptureGuard | None = None,
     ) -> None:
         self._selector = selector
         self._capture = capture
@@ -103,6 +115,7 @@ class GamingModePipeline:
         self._config = config
         self._clock = clock
         self._runtime_metrics = runtime_metrics
+        self._capture_guard = capture_guard or NoopOverlayCaptureGuard()
         self._block_merger = block_merger or OcrBlockMerger(
             OcrMergePolicy(min_confidence=0.0, tiny_area_threshold=0)
         )
@@ -141,7 +154,18 @@ class GamingModePipeline:
         logger.info("GamingModePipeline selected region used selected_region=%s", region)
 
         capture_start = self._clock()
-        captured = self._capture.capture(region)
+        with self._capture_guard.hidden_for_capture(capture_regions=(region,)):
+            logger.debug(
+                "capture started capture_without_overlays=true mode=gaming region=%s",
+                region,
+            )
+            try:
+                captured = self._capture.capture(region)
+            finally:
+                logger.debug(
+                    "capture finished capture_without_overlays=true mode=gaming region=%s",
+                    region,
+                )
         capture_ms = self._elapsed_ms(capture_start)
 
         logger.debug(
@@ -216,7 +240,7 @@ class GamingModePipeline:
             self._overlay.clear()
             self._overlay.show_items(items)
             clear_after = getattr(self._overlay, "clear_after", None)
-            if callable(clear_after):
+            if callable(clear_after) and self._config.gaming_overlay_ttl_ms > 0:
                 clear_after(self._config.gaming_overlay_ttl_ms)
         except Exception:
             logger.exception("GamingModePipeline overlay render result=failure")
@@ -246,6 +270,131 @@ class GamingModePipeline:
             translation_count=len(translation_batch.translated_texts),
             cache_hits=translation_batch.cache_hits,
             cache_misses=translation_batch.cache_misses,
+        )
+        return True
+
+    def run_zones(self, zones: tuple[TranslationZone, ...]) -> bool:
+        active_zones = tuple(zone for zone in zones if zone.enabled)
+        if not active_zones:
+            logger.error("GamingModePipeline stopped: no gaming zones")
+            return False
+        logger.info("GamingModePipeline started zone_count=%d", len(active_zones))
+
+        captures: list[tuple[TranslationZone, CapturedImage, float]] = []
+        with self._capture_guard.hidden_for_capture(
+            capture_regions=tuple(zone.region for zone in active_zones),
+        ):
+            for zone in active_zones:
+                capture_start = self._clock()
+                logger.debug(
+                    "capture started capture_without_overlays=true mode=gaming zone_id=%s region=%s",
+                    zone.id,
+                    zone.region,
+                )
+                try:
+                    captured = self._capture.capture(zone.region)
+                finally:
+                    logger.debug(
+                        "capture finished capture_without_overlays=true mode=gaming zone_id=%s region=%s",
+                        zone.id,
+                        zone.region,
+                    )
+                captures.append((zone, captured, self._elapsed_ms(capture_start)))
+
+        capture_ms = sum(capture_ms for _, _, capture_ms in captures)
+        ocr_ms = 0.0
+        cache_lookup_ms = 0.0
+        translation_request_ms = 0.0
+        ocr_count = 0
+        translation_count = 0
+        cache_hits = 0
+        cache_misses = 0
+        cache_statuses: list[str] = []
+        items = []
+
+        for zone, captured, _zone_capture_ms in captures:
+            logger.debug(
+                "pipeline OCR input payload_type=%s zone_id=%s",
+                type(captured.image).__name__,
+                zone.id,
+            )
+            image_fingerprint = _image_fingerprint(captured.image)
+            ocr_blocks, zone_ocr_ms = self._ocr_blocks_for_capture(
+                captured,
+                image_fingerprint=image_fingerprint,
+            )
+            ocr_ms += zone_ocr_ms
+            ocr_count += len(ocr_blocks)
+            translation_blocks = self._block_merger.merge(ocr_blocks)
+            if not translation_blocks:
+                continue
+
+            translation_batch = self._translator.translate_blocks(translation_blocks)
+            cache_lookup_ms += translation_batch.cache_lookup_ms
+            translation_request_ms += translation_batch.translation_request_ms
+            cache_hits += translation_batch.cache_hits
+            cache_misses += translation_batch.cache_misses
+            translation_count += len(translation_batch.translated_texts)
+            cache_statuses.append(translation_batch.cache_status)
+            items.extend(
+                build_overlay_items(
+                    translation_blocks,
+                    translation_batch.translated_texts,
+                    selected_region=zone.region,
+                    max_panel_width=self._config.overlay_max_width,
+                    overlay_style=zone.overlay_style.value,
+                    zone_id=zone.id,
+                    inline_min_font_size=self._config.overlay_inline_min_font_size,
+                    inline_max_font_size=self._config.overlay_inline_max_font_size,
+                    inline_padding=self._config.overlay_inline_padding,
+                    inline_allow_expand_ratio=self._config.overlay_inline_allow_expand_ratio,
+                )
+            )
+
+        timings_before_overlay = PipelineTimings(
+            capture_ms=capture_ms,
+            ocr_ms=ocr_ms,
+            cache_lookup_ms=cache_lookup_ms,
+            translation_request_ms=translation_request_ms,
+            overlay_render_ms=0.0,
+            cache_status=_combined_cache_status(cache_statuses),
+            region_width=sum(zone.region.width for zone in active_zones),
+            region_height=max(zone.region.height for zone in active_zones),
+        )
+        if self._config.debug_overlay_enabled:
+            items = append_debug_overlay_item(items, timings_before_overlay)
+
+        overlay_start = self._clock()
+        try:
+            self._overlay.clear()
+            self._overlay.show_items(items)
+            clear_after = getattr(self._overlay, "clear_after", None)
+            if callable(clear_after) and self._config.gaming_overlay_ttl_ms > 0:
+                clear_after(self._config.gaming_overlay_ttl_ms)
+        except Exception:
+            logger.exception("GamingModePipeline overlay render result=failure")
+            raise
+        overlay_render_ms = self._elapsed_ms(overlay_start)
+        logger.info(
+            "GamingModePipeline overlay render result=success item_count=%d overlay_render_ms=%.2f",
+            len(items),
+            overlay_render_ms,
+        )
+        self._record_metrics(
+            PipelineTimings(
+                capture_ms=capture_ms,
+                ocr_ms=ocr_ms,
+                cache_lookup_ms=cache_lookup_ms,
+                translation_request_ms=translation_request_ms,
+                overlay_render_ms=overlay_render_ms,
+                cache_status=timings_before_overlay.cache_status,
+                region_width=timings_before_overlay.region_width,
+                region_height=timings_before_overlay.region_height,
+            ),
+            ocr_count=ocr_count,
+            translation_count=translation_count,
+            cache_hits=cache_hits,
+            cache_misses=cache_misses,
         )
         return True
 
@@ -381,6 +530,15 @@ def _sample_payload(payload: bytes) -> bytes:
     )
 
 
+def _combined_cache_status(statuses: list[str]) -> str:
+    if not statuses:
+        return "none"
+    unique = set(statuses)
+    if len(unique) == 1:
+        return statuses[0]
+    return "mixed"
+
+
 def build_default_pipeline(
     config: AppConfig | None = None,
     runtime_metrics: RuntimeMetrics | None = None,
@@ -388,15 +546,17 @@ def build_default_pipeline(
     runtime_config = config or AppConfig()
     ocr = PaddleOcrProvider()
     ocr.warm_up()
+    overlay = BlurOverlayWindow(style=_overlay_style_from_config(runtime_config))
     return GamingModePipeline(
         selector=QtRegionSelector(),
         capture=QtScreenCapture(),
         ocr=ocr,
         cache=SQLiteTranslationCache(runtime_config.cache_path),
         translation_client=HttpTranslationClient(runtime_config.translation_server_url),
-        overlay=BlurOverlayWindow(style=_overlay_style_from_config(runtime_config)),
+        overlay=overlay,
         config=runtime_config,
         runtime_metrics=runtime_metrics,
+        capture_guard=OverlayCaptureGuard([overlay]),
     )
 
 

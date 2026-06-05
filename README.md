@@ -15,7 +15,7 @@ Windows Gaming Mode is a one-shot translation flow:
 - Use Google Translate as the first server-side provider.
 - Cache translations locally with memory-first SQLite.
 - Display translated text in a frameless blur-style overlay.
-- Replace old Gaming Mode overlay items on each run and auto-hide them after `SCREEN_TRANSLATOR_GAMING_OVERLAY_TTL_MS`.
+- Replace old Gaming Mode overlay items on each run and keep them visible until dismissed by default.
 - Stop Reading Mode and clear the Reading overlay before running one-shot Gaming Mode.
 - Reuse Gaming Mode OCR results for the same selected region and unchanged frame within `SCREEN_TRANSLATOR_GAMING_OCR_CACHE_TTL_MS`.
 - Clear the Gaming overlay without stopping the app with `SCREEN_TRANSLATOR_GAMING_DISMISS_HOTKEY`, default `Esc`.
@@ -143,8 +143,8 @@ $env:SCREEN_TRANSLATOR_READING_MIN_CONFIDENCE = "0.5"
 Overlay settings:
 
 ```powershell
-# Gaming Mode overlay auto-hide timeout.
-$env:SCREEN_TRANSLATOR_GAMING_OVERLAY_TTL_MS = "5000"
+# Gaming Mode overlay auto-hide timeout. 0 keeps the overlay until dismissed.
+$env:SCREEN_TRANSLATOR_GAMING_OVERLAY_TTL_MS = "0"
 
 # Reuse OCR results for an unchanged Gaming Mode region within this TTL.
 $env:SCREEN_TRANSLATOR_GAMING_OCR_CACHE_TTL_MS = "10000"
@@ -178,7 +178,7 @@ $env:SCREEN_TRANSLATOR_DEBUG_OVERLAY = "true"
 
 The debug overlay shows OCR time, translation time, cache hit/miss status, selected region size, and warnings when `total_pipeline_ms`, `ocr_ms`, or `translation_ms` exceed 2000 ms. The Gaming overlay paints only translation panels; the full-screen overlay host remains transparent outside those panels.
 
-Debug logs include the latest `total_pipeline_ms`, `capture_ms`, `ocr_ms`, `cache_lookup_ms`, `translation_ms`, `translation_request_ms`, `overlay_ms`, and `overlay_render_ms`, plus rolling averages over the last 10 and last 100 Reading Mode runs. Gaming Mode logs hotkey press time, overlay shown time, total hotkey response time, translation unit count, translation request count, `gaming_ocr_cache_hit` or `gaming_ocr_cache_miss`, and the lightweight `image_fingerprint`.
+Debug logs include the latest `total_pipeline_ms`, `capture_ms`, `ocr_ms`, `cache_lookup_ms`, `translation_ms`, `translation_request_ms`, `overlay_ms`, and `overlay_render_ms`, plus rolling averages over the last 10 and last 100 Reading Mode runs. Before OCR capture, Reading Mode and Gaming Mode temporarily hide app-owned overlays so OCR reads the underlying screen; debug logs include `capture_without_overlays=true`, `overlays hidden before capture`, and `overlays restored after capture`. Gaming Mode logs hotkey press time, overlay shown time, total hotkey response time, translation unit count, translation request count, `gaming_ocr_cache_hit` or `gaming_ocr_cache_miss`, and the lightweight `image_fingerprint`.
 
 Runtime metrics also track OCR count, translation count, cache hits, cache misses, Gaming OCR cache hits, Gaming OCR cache misses, whether Reading Mode was auto-stopped by Gaming Mode, average latency, skipped busy ticks, stale results ignored after stop, mode start/stop events, and the last user-visible error. PaddleOCR is initialized once per process, warmed up at startup, and reused by Reading Mode and Gaming Mode.
 

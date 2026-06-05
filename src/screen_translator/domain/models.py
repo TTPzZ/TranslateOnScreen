@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
 
 
@@ -43,6 +44,48 @@ class ScreenRegion:
             width=right - left,
             height=bottom - top,
         )
+
+
+class OverlayStyleMode(StrEnum):
+    FLOATING_PANEL = "floating_panel"
+    INLINE_REPLACE = "inline_replace"
+
+
+class TranslationZoneMode(StrEnum):
+    READING = "reading"
+    GAMING = "gaming"
+    BOTH = "both"
+    DISABLED = "disabled"
+
+
+@dataclass(frozen=True, slots=True)
+class TranslationZone:
+    """Persistent user-selected screen translation area."""
+
+    id: str
+    name: str
+    region: ScreenRegion
+    enabled: bool = True
+    visible: bool = True
+    translation_visible: bool = True
+    mode: TranslationZoneMode | str | None = TranslationZoneMode.READING
+    overlay_style: OverlayStyleMode | str = OverlayStyleMode.FLOATING_PANEL
+    created_at: str = ""
+    updated_at: str = ""
+    last_ocr_result: Any | None = field(default=None, compare=False, repr=False)
+    last_translation_result: Any | None = field(default=None, compare=False, repr=False)
+
+    def __post_init__(self) -> None:
+        zone_id = self.id.strip()
+        name = self.name.strip()
+        if not zone_id:
+            raise ValueError("id must not be empty")
+        if not name:
+            raise ValueError("name must not be empty")
+        object.__setattr__(self, "id", zone_id)
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "mode", _normalize_zone_mode(self.mode))
+        object.__setattr__(self, "overlay_style", OverlayStyleMode(self.overlay_style))
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +169,17 @@ def _normalize_name(value: str, field_name: str) -> str:
     if not normalized:
         raise ValueError(f"{field_name} must not be empty")
     return normalized
+
+
+def _normalize_zone_mode(value: TranslationZoneMode | str | None) -> TranslationZoneMode:
+    if isinstance(value, TranslationZoneMode):
+        return value
+    if value is None:
+        return TranslationZoneMode.READING
+    try:
+        return TranslationZoneMode(str(value).strip().lower())
+    except ValueError:
+        return TranslationZoneMode.READING
 
 
 _MOJIBAKE_MARKERS = ("Ã", "Â", "â€", "â€™", "áº", "á»", "Æ")

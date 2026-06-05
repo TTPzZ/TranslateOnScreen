@@ -3,10 +3,12 @@ from __future__ import annotations
 from ctypes import wintypes
 from typing import Any, Protocol
 
+from screen_translator.domain.models import TranslationZone
 from screen_translator.ui.settings import (
     PROVIDER_OPTIONS,
     SOURCE_LANGUAGE_OPTIONS,
     ControlPanelSettings,
+    validate_hotkey_text,
 )
 
 
@@ -37,6 +39,54 @@ class ControlController(Protocol):
 
     def clear_region(self) -> bool:
         """Clear selected region."""
+
+    def zones(self) -> tuple[TranslationZone, ...]:
+        """Return configured translation zones."""
+
+    def add_zone(self) -> bool:
+        """Create a translation zone from region selection."""
+
+    def delete_zone(self, zone_id: str) -> bool:
+        """Delete a translation zone."""
+
+    def rename_zone(self, zone_id: str, name: str) -> bool:
+        """Rename a translation zone."""
+
+    def toggle_zone_visible(self, zone_id: str) -> bool:
+        """Toggle zone border/chrome visibility."""
+
+    def toggle_zone_enabled(self, zone_id: str) -> bool:
+        """Toggle zone translation/scanning enabled state."""
+
+    def set_zone_overlay_style(self, zone_id: str, style: str) -> bool:
+        """Set zone overlay style."""
+
+    def set_zone_mode(self, zone_id: str, mode: str) -> bool:
+        """Set zone mode."""
+
+    def edit_zone_position(self, zone_id: str) -> bool:
+        """Replace a zone region using the region selector."""
+
+    def show_all_zones(self) -> bool:
+        """Show every zone border/chrome."""
+
+    def hide_all_zones(self) -> bool:
+        """Hide every zone border/chrome."""
+
+    def clear_zone_borders(self) -> bool:
+        """Clear the zone border overlay."""
+
+    def toggle_zone_borders(self) -> bool:
+        """Show or hide zone borders."""
+
+    def delete_all_zones(self) -> bool:
+        """Delete all zones."""
+
+    def set_edit_zones_enabled(self, enabled: bool) -> bool:
+        """Toggle Edit Zones mode."""
+
+    def clear_all_translations(self) -> bool:
+        """Clear translated Reading Mode overlay items."""
 
     def settings(self) -> ControlPanelSettings:
         """Return current control-panel settings."""
@@ -99,6 +149,54 @@ class ControlPanelPresenter:
     def clear_region(self) -> bool:
         return self._controller.clear_region()
 
+    def zones(self) -> tuple[TranslationZone, ...]:
+        return self._controller.zones()
+
+    def add_zone(self) -> bool:
+        return self._controller.add_zone()
+
+    def delete_zone(self, zone_id: str) -> bool:
+        return self._controller.delete_zone(zone_id)
+
+    def rename_zone(self, zone_id: str, name: str) -> bool:
+        return self._controller.rename_zone(zone_id, name)
+
+    def toggle_zone_visible(self, zone_id: str) -> bool:
+        return self._controller.toggle_zone_visible(zone_id)
+
+    def toggle_zone_enabled(self, zone_id: str) -> bool:
+        return self._controller.toggle_zone_enabled(zone_id)
+
+    def set_zone_overlay_style(self, zone_id: str, style: str) -> bool:
+        return self._controller.set_zone_overlay_style(zone_id, style)
+
+    def set_zone_mode(self, zone_id: str, mode: str) -> bool:
+        return self._controller.set_zone_mode(zone_id, mode)
+
+    def edit_zone_position(self, zone_id: str) -> bool:
+        return self._controller.edit_zone_position(zone_id)
+
+    def show_all_zones(self) -> bool:
+        return self._controller.show_all_zones()
+
+    def hide_all_zones(self) -> bool:
+        return self._controller.hide_all_zones()
+
+    def clear_zone_borders(self) -> bool:
+        return self._controller.clear_zone_borders()
+
+    def toggle_zone_borders(self) -> bool:
+        return self._controller.toggle_zone_borders()
+
+    def delete_all_zones(self) -> bool:
+        return self._controller.delete_all_zones()
+
+    def set_edit_zones_enabled(self, enabled: bool) -> bool:
+        return self._controller.set_edit_zones_enabled(enabled)
+
+    def clear_all_translations(self) -> bool:
+        return self._controller.clear_all_translations()
+
     def settings(self) -> ControlPanelSettings:
         return self._controller.settings()
 
@@ -146,6 +244,30 @@ class ControlPanelPresenter:
             lines.append(f"Last Error: {self._controller.last_error}")
         return lines
 
+    def diagnostic_groups(self) -> dict[str, list[str]]:
+        groups: dict[str, list[str]] = {
+            "Translation": [],
+            "OCR": [],
+            "Gaming": [],
+            "Latency": [],
+            "Zones": [],
+            "General": [],
+        }
+        for line in self._controller.diagnostic_lines():
+            if line.startswith(("Translation Count:", "Cache Hits:", "Cache Misses:")):
+                groups["Translation"].append(line)
+            elif line.startswith("OCR Count:"):
+                groups["OCR"].append(line)
+            elif line.startswith(("Gaming OCR Cache", "Reading Auto-Stopped By Gaming:")):
+                groups["Gaming"].append(line)
+            elif "Latency" in line:
+                groups["Latency"].append(line)
+            elif line.startswith(("Reading Zones:", "Gaming Zones:", "Both Zones:")):
+                groups["Zones"].append(line)
+            else:
+                groups["General"].append(line)
+        return groups
+
     def region_text(self) -> str:
         region = self._controller.current_region
         if region is None:
@@ -191,7 +313,7 @@ class ControlPanelWindow:
         app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
         self._app = app
         if self._window is None:
-            self._window = _build_window(QtWidgets, self._presenter)
+            self._window = _build_window(QtWidgets, self._presenter, QtCore=QtCore)
         self._install_hotkey_filter(QtCore, app)
         self._window.show()
         app.processEvents()
@@ -241,7 +363,7 @@ def _load_qt() -> dict[str, Any]:
     return {"QtCore": QtCore, "QtWidgets": QtWidgets}
 
 
-def _build_window(QtWidgets: Any, presenter: ControlPanelPresenter) -> Any:
+def _build_window(QtWidgets: Any, presenter: ControlPanelPresenter, *, QtCore: Any | None = None) -> Any:
     window = QtWidgets.QWidget()
     window.setWindowTitle("Screen Translator")
     if hasattr(window, "resize"):
@@ -250,77 +372,32 @@ def _build_window(QtWidgets: Any, presenter: ControlPanelPresenter) -> Any:
         window.setMinimumWidth(760)
     layout = QtWidgets.QVBoxLayout(window)
     settings = presenter.settings()
-    controls: dict[str, Any] = {}
 
     tabs = QtWidgets.QTabWidget()
     layout.addWidget(tabs)
 
-    region_tab = _new_tab(QtWidgets)
-    region_layout = QtWidgets.QVBoxLayout(region_tab)
-    select_button = QtWidgets.QPushButton("Select Region")
-    clear_region_button = QtWidgets.QPushButton("Clear Region")
-    region_label = QtWidgets.QLabel(presenter.region_text())
-    region_layout.addWidget(region_label)
-    region_layout.addWidget(select_button)
-    region_layout.addWidget(clear_region_button)
-    tabs.addTab(region_tab, "Region")
-
-    gaming_tab = _new_tab(QtWidgets)
-    gaming_layout = QtWidgets.QVBoxLayout(gaming_tab)
-    gaming_button = QtWidgets.QPushButton("Run Gaming Translation Once")
-    clear_gaming_button = QtWidgets.QPushButton("Clear Gaming Overlay")
-    gaming_hotkey = _line_edit(QtWidgets, settings.gaming_hotkey, label="Gaming Hotkey")
-    gaming_dismiss_hotkey = _line_edit(
-        QtWidgets,
-        settings.gaming_dismiss_hotkey,
-        label="Gaming Dismiss Hotkey",
+    zones_tab = _new_tab(QtWidgets)
+    zones_layout = QtWidgets.QVBoxLayout(zones_tab)
+    zones_table = QtWidgets.QTableWidget()
+    setattr(zones_table, "label", "Zones")
+    zones_table.setColumnCount(8)
+    zones_table.setHorizontalHeaderLabels(
+        ["Name", "X", "Y", "Width", "Height", "Visible", "Style", "Mode"]
     )
-    overlay_ttl = _spinbox(
-        QtWidgets,
-        label="Overlay TTL ms",
-        value=settings.gaming_overlay_ttl_ms,
-        minimum=0,
-        maximum=60000,
-    )
-    gaming_layout.addWidget(gaming_button)
-    _add_labeled_widget(QtWidgets, gaming_layout, "Gaming Hotkey", gaming_hotkey)
-    _add_labeled_widget(QtWidgets, gaming_layout, "Gaming Dismiss Hotkey", gaming_dismiss_hotkey)
-    _add_labeled_widget(QtWidgets, gaming_layout, "Overlay TTL ms", overlay_ttl)
-    gaming_layout.addWidget(clear_gaming_button)
-    tabs.addTab(gaming_tab, "Gaming Mode")
-
-    reading_tab = _new_tab(QtWidgets)
-    reading_layout = QtWidgets.QVBoxLayout(reading_tab)
-    start_button = QtWidgets.QPushButton("Start Reading Mode")
-    stop_button = QtWidgets.QPushButton("Stop Reading Mode")
-    reading_interval = _spinbox(
-        QtWidgets,
-        label="Reading Interval ms",
-        value=settings.reading_interval_ms,
-        minimum=100,
-        maximum=10000,
-    )
-    change_threshold = _double_spinbox(
-        QtWidgets,
-        label="Change Threshold",
-        value=settings.reading_change_threshold,
-        minimum=0.0,
-        maximum=1.0,
-        step=0.01,
-    )
-    missing_timeout = _spinbox(
-        QtWidgets,
-        label="Missing Timeout ms",
-        value=settings.reading_missing_timeout_ms,
-        minimum=0,
-        maximum=60000,
-    )
-    reading_layout.addWidget(start_button)
-    reading_layout.addWidget(stop_button)
-    _add_labeled_widget(QtWidgets, reading_layout, "Reading Interval ms", reading_interval)
-    _add_labeled_widget(QtWidgets, reading_layout, "Change Threshold", change_threshold)
-    _add_labeled_widget(QtWidgets, reading_layout, "Missing Timeout ms", missing_timeout)
-    tabs.addTab(reading_tab, "Reading Mode")
+    add_zone_button = QtWidgets.QPushButton("Add Zone")
+    toggle_zones_button = QtWidgets.QPushButton("Show Zones / Hide Zones")
+    edit_zones_checkbox = QtWidgets.QCheckBox("Edit Zones")
+    delete_all_zones_button = QtWidgets.QPushButton("Delete All Zones")
+    if hasattr(toggle_zones_button, "setToolTip"):
+        toggle_zones_button.setToolTip("Show or hide zone borders only.")
+    if hasattr(edit_zones_checkbox, "setToolTip"):
+        edit_zones_checkbox.setToolTip("Enable zone toolbar controls and interactivity.")
+    zones_layout.addWidget(zones_table)
+    zones_layout.addWidget(add_zone_button)
+    zones_layout.addWidget(toggle_zones_button)
+    zones_layout.addWidget(edit_zones_checkbox)
+    zones_layout.addWidget(delete_all_zones_button)
+    tabs.addTab(zones_tab, "Zones")
 
     translation_tab = _new_tab(QtWidgets)
     translation_layout = QtWidgets.QVBoxLayout(translation_tab)
@@ -349,22 +426,10 @@ def _build_window(QtWidgets: Any, presenter: ControlPanelPresenter) -> Any:
         settings.translation_server_url,
         label="Server URL",
     )
-    start_server_button = QtWidgets.QPushButton("Start Local Server")
-    stop_server_button = QtWidgets.QPushButton("Stop Local Server")
-    server_status_button = QtWidgets.QPushButton("Server Status")
-    server_status_label = QtWidgets.QLabel(f"Server {presenter.server_status()}")
     _add_labeled_widget(QtWidgets, translation_layout, "Provider", provider_combo)
     _add_labeled_widget(QtWidgets, translation_layout, "Source Language", source_combo)
     _add_labeled_widget(QtWidgets, translation_layout, "Target Language", target_combo)
     _add_labeled_widget(QtWidgets, translation_layout, "Server URL", server_url)
-    translation_layout.addWidget(start_server_button)
-    translation_layout.addWidget(stop_server_button)
-    translation_layout.addWidget(server_status_button)
-    translation_layout.addWidget(server_status_label)
-    tabs.addTab(translation_tab, "Translation")
-
-    overlay_tab = _new_tab(QtWidgets)
-    overlay_layout = QtWidgets.QVBoxLayout(overlay_tab)
     overlay_max_width = _spinbox(
         QtWidgets,
         label="Overlay Max Width",
@@ -388,20 +453,103 @@ def _build_window(QtWidgets: Any, presenter: ControlPanelPresenter) -> Any:
     )
     debug_overlay = QtWidgets.QCheckBox("Debug Overlay")
     debug_overlay.setChecked(settings.debug_overlay_enabled)
+    _add_labeled_widget(QtWidgets, translation_layout, "Overlay Max Width", overlay_max_width)
+    _add_labeled_widget(QtWidgets, translation_layout, "Overlay Font Size", overlay_font_size)
+    _add_labeled_widget(QtWidgets, translation_layout, "Panel Opacity", overlay_opacity)
+    translation_layout.addWidget(debug_overlay)
+    tabs.addTab(translation_tab, "Translation")
+
+    hotkeys_tab = _new_tab(QtWidgets)
+    hotkeys_layout = QtWidgets.QVBoxLayout(hotkeys_tab)
+    gaming_hotkey = _line_edit(QtWidgets, _display_hotkey(settings.gaming_hotkey), label="Gaming Hotkey")
+    gaming_dismiss_hotkey = _line_edit(
+        QtWidgets,
+        _display_hotkey(settings.gaming_dismiss_hotkey),
+        label="Gaming Dismiss Hotkey",
+    )
+    for field in (gaming_hotkey, gaming_dismiss_hotkey):
+        if hasattr(field, "setReadOnly"):
+            field.setReadOnly(True)
+    record_gaming_hotkey_button = _hotkey_record_button(QtWidgets, QtCore)("Record Gaming Hotkey")
+    record_dismiss_hotkey_button = _hotkey_record_button(QtWidgets, QtCore)("Record Dismiss Hotkey")
+    _add_labeled_widget(QtWidgets, hotkeys_layout, "Gaming Hotkey", gaming_hotkey)
+    hotkeys_layout.addWidget(record_gaming_hotkey_button)
+    _add_labeled_widget(QtWidgets, hotkeys_layout, "Gaming Dismiss Hotkey", gaming_dismiss_hotkey)
+    hotkeys_layout.addWidget(record_dismiss_hotkey_button)
+    hotkey_recorders = {
+        "Gaming Hotkey": _HotkeyRecorder(
+            label="Gaming Hotkey",
+            display=gaming_hotkey,
+            button=record_gaming_hotkey_button,
+            other_label="Gaming Dismiss Hotkey",
+            other_display=gaming_dismiss_hotkey,
+            presenter=presenter,
+            QtCore=QtCore,
+        ),
+        "Gaming Dismiss Hotkey": _HotkeyRecorder(
+            label="Gaming Dismiss Hotkey",
+            display=gaming_dismiss_hotkey,
+            button=record_dismiss_hotkey_button,
+            other_label="Gaming Hotkey",
+            other_display=gaming_hotkey,
+            presenter=presenter,
+            QtCore=QtCore,
+        ),
+    }
+    tabs.addTab(hotkeys_tab, "Hotkeys")
+
+    advanced_tab = _new_tab(QtWidgets)
+    advanced_layout = QtWidgets.QVBoxLayout(advanced_tab)
+    reading_interval = _spinbox(
+        QtWidgets,
+        label="Reading Interval ms",
+        value=settings.reading_interval_ms,
+        minimum=100,
+        maximum=10000,
+    )
+    change_threshold = _double_spinbox(
+        QtWidgets,
+        label="Change Threshold",
+        value=settings.reading_change_threshold,
+        minimum=0.0,
+        maximum=1.0,
+        step=0.01,
+    )
+    missing_timeout = _spinbox(
+        QtWidgets,
+        label="Missing Timeout ms",
+        value=settings.reading_missing_timeout_ms,
+        minimum=0,
+        maximum=60000,
+    )
+    overlay_ttl = _spinbox(
+        QtWidgets,
+        label="Overlay TTL ms",
+        value=settings.gaming_overlay_ttl_ms,
+        minimum=0,
+        maximum=60000,
+    )
+    if hasattr(overlay_ttl, "setSpecialValueText"):
+        overlay_ttl.setSpecialValueText("0 - dismiss only")
+    if hasattr(overlay_ttl, "setToolTip"):
+        overlay_ttl.setToolTip("0 keeps the Gaming overlay visible until Esc or Clear Gaming Overlay.")
     debug_mode = QtWidgets.QCheckBox("Debug Logs")
     debug_mode.setChecked(settings.debug_mode)
-    _add_labeled_widget(QtWidgets, overlay_layout, "Overlay Max Width", overlay_max_width)
-    _add_labeled_widget(QtWidgets, overlay_layout, "Overlay Font Size", overlay_font_size)
-    _add_labeled_widget(QtWidgets, overlay_layout, "Panel Opacity", overlay_opacity)
-    overlay_layout.addWidget(debug_overlay)
-    overlay_layout.addWidget(debug_mode)
-    tabs.addTab(overlay_tab, "Overlay")
-
-    diagnostics_tab = _new_tab(QtWidgets)
-    diagnostics_layout = QtWidgets.QVBoxLayout(diagnostics_tab)
-    status_label = QtWidgets.QLabel("\n".join(presenter.status_lines()))
-    diagnostics_layout.addWidget(status_label)
-    tabs.addTab(diagnostics_tab, "Diagnostics")
+    _add_labeled_widget(QtWidgets, advanced_layout, "Reading Interval ms", reading_interval)
+    _add_labeled_widget(QtWidgets, advanced_layout, "Change Threshold", change_threshold)
+    _add_labeled_widget(QtWidgets, advanced_layout, "Missing Timeout ms", missing_timeout)
+    _add_labeled_widget(QtWidgets, advanced_layout, "Overlay TTL ms", overlay_ttl)
+    advanced_layout.addWidget(debug_mode)
+    start_server_button = QtWidgets.QPushButton("Start Local Server")
+    stop_server_button = QtWidgets.QPushButton("Stop Local Server")
+    server_status_button = QtWidgets.QPushButton("Server Status")
+    server_status_label = QtWidgets.QLabel(f"Server {presenter.server_status()}")
+    advanced_layout.addWidget(start_server_button)
+    advanced_layout.addWidget(stop_server_button)
+    advanced_layout.addWidget(server_status_button)
+    advanced_layout.addWidget(server_status_label)
+    diagnostic_labels = _add_diagnostic_groups(QtWidgets, advanced_layout, presenter.diagnostic_groups())
+    tabs.addTab(advanced_tab, "Advanced")
 
     save_button = QtWidgets.QPushButton("Save Settings")
     reset_button = QtWidgets.QPushButton("Reset Default Settings")
@@ -411,31 +559,36 @@ def _build_window(QtWidgets: Any, presenter: ControlPanelPresenter) -> Any:
     layout.addWidget(reset_button)
     layout.addWidget(status_bar)
 
-    controls.update(
-        provider_combo=provider_combo,
-        source_combo=source_combo,
-        target_combo=target_combo,
-        server_url=server_url,
-        reading_interval=reading_interval,
-        change_threshold=change_threshold,
-        missing_timeout=missing_timeout,
-        overlay_ttl=overlay_ttl,
-        gaming_hotkey=gaming_hotkey,
-        gaming_dismiss_hotkey=gaming_dismiss_hotkey,
-        overlay_max_width=overlay_max_width,
-        overlay_font_size=overlay_font_size,
-        overlay_opacity=overlay_opacity,
-        debug_overlay=debug_overlay,
-        debug_mode=debug_mode,
-    )
+    def refresh_zones() -> None:
+        zones = list(presenter.zones())
+        zones_table.setRowCount(len(zones))
+        for row, zone in enumerate(zones):
+            values = [
+                zone.name,
+                str(zone.region.x),
+                str(zone.region.y),
+                str(zone.region.width),
+                str(zone.region.height),
+                "yes" if zone.visible else "no",
+                zone.overlay_style.value,
+                zone.mode.value,
+            ]
+            for column, value in enumerate(values):
+                zones_table.setItem(row, column, QtWidgets.QTableWidgetItem(value))
 
     def refresh_status() -> None:
-        region_label.setText(presenter.region_text())
         server_status_label.setText(f"Server {presenter.server_status()}")
-        status_label.setText("\n".join(presenter.status_lines()))
+        _refresh_diagnostic_groups(diagnostic_labels, presenter.diagnostic_groups())
+        setattr(window, "diagnostic_groups", presenter.diagnostic_groups())
         status_bar.setText(presenter.status_text())
+        refresh_zones()
 
     def read_settings() -> ControlPanelSettings:
+        current_settings = presenter.settings()
+        gaming_hotkey_text = gaming_hotkey.text()
+        dismiss_hotkey_text = gaming_dismiss_hotkey.text()
+        if validate_hotkey_text(gaming_hotkey_text) == validate_hotkey_text(dismiss_hotkey_text):
+            raise ValueError("Gaming Dismiss Hotkey duplicates Gaming Hotkey")
         return ControlPanelSettings(
             translation_provider=provider_combo.currentText(),
             source_language=source_combo.currentText(),
@@ -445,13 +598,21 @@ def _build_window(QtWidgets: Any, presenter: ControlPanelPresenter) -> Any:
             reading_change_threshold=change_threshold.value(),
             reading_missing_timeout_ms=missing_timeout.value(),
             gaming_overlay_ttl_ms=overlay_ttl.value(),
-            gaming_hotkey=gaming_hotkey.text(),
-            gaming_dismiss_hotkey=gaming_dismiss_hotkey.text(),
+            gaming_hotkey=gaming_hotkey_text,
+            gaming_dismiss_hotkey=dismiss_hotkey_text,
             overlay_max_width=overlay_max_width.value(),
             overlay_font_size=overlay_font_size.value(),
             overlay_panel_opacity=overlay_opacity.value(),
             debug_mode=debug_mode.isChecked(),
             debug_overlay_enabled=debug_overlay.isChecked(),
+            zones=current_settings.zones,
+            show_zone_borders=current_settings.show_zone_borders,
+            show_zone_translations=current_settings.show_zone_translations,
+            show_all_zone_overlays=current_settings.show_all_zone_overlays,
+            overlay_inline_min_font_size=current_settings.overlay_inline_min_font_size,
+            overlay_inline_max_font_size=current_settings.overlay_inline_max_font_size,
+            overlay_inline_padding=current_settings.overlay_inline_padding,
+            overlay_inline_allow_expand_ratio=current_settings.overlay_inline_allow_expand_ratio,
         )
 
     def run_and_refresh(action: Any) -> Any:
@@ -466,37 +627,39 @@ def _build_window(QtWidgets: Any, presenter: ControlPanelPresenter) -> Any:
     def save_and_refresh() -> bool:
         return run_and_refresh(lambda: presenter.save_settings(read_settings()))
 
+    def run_zone_action(action: Any) -> Any:
+        result = run_and_refresh(action)
+        refresh_zones()
+        return result
+
     window.refresh_status = refresh_status
 
-    select_button.clicked.connect(lambda _checked=False: run_and_refresh(presenter.select_region))
-    clear_region_button.clicked.connect(lambda _checked=False: run_and_refresh(presenter.clear_region))
-    gaming_button.clicked.connect(
-        lambda _checked=False: run_and_refresh(presenter.run_gaming_translation_once)
-    )
-    clear_gaming_button.clicked.connect(
-        lambda _checked=False: run_and_refresh(presenter.clear_gaming_overlay)
-    )
-    start_button.clicked.connect(lambda _checked=False: run_and_refresh(presenter.start_reading_mode))
-    stop_button.clicked.connect(lambda _checked=False: run_and_refresh(presenter.stop_reading_mode))
     save_button.clicked.connect(lambda _checked=False: save_and_refresh())
     reset_button.clicked.connect(lambda _checked=False: run_and_refresh(presenter.reset_settings))
     start_server_button.clicked.connect(lambda _checked=False: run_and_refresh(presenter.start_local_server))
     stop_server_button.clicked.connect(lambda _checked=False: run_and_refresh(presenter.stop_local_server))
     server_status_button.clicked.connect(lambda _checked=False: refresh_status())
+    add_zone_button.clicked.connect(lambda _checked=False: run_zone_action(presenter.add_zone))
+    toggle_zones_button.clicked.connect(lambda _checked=False: run_zone_action(presenter.toggle_zone_borders))
+    edit_zones_checkbox.toggled.connect(
+        lambda checked=False: run_zone_action(lambda: presenter.set_edit_zones_enabled(checked))
+    )
+    delete_all_zones_button.clicked.connect(lambda _checked=False: run_zone_action(presenter.delete_all_zones))
+    refresh_zones()
+    setattr(window, "tabs", getattr(tabs, "tabs", []))
+    setattr(window, "hotkey_recorders", hotkey_recorders)
+    setattr(window, "diagnostic_groups", presenter.diagnostic_groups())
     _register_test_controls(
         window,
         buttons={
-            "Select Region": select_button,
-            "Clear Region": clear_region_button,
-            "Run Gaming Translation Once": gaming_button,
-            "Clear Gaming Overlay": clear_gaming_button,
-            "Start Reading Mode": start_button,
-            "Stop Reading Mode": stop_button,
             "Start Local Server": start_server_button,
             "Stop Local Server": stop_server_button,
             "Server Status": server_status_button,
             "Save Settings": save_button,
             "Reset Default Settings": reset_button,
+            "Add Zone": add_zone_button,
+            "Show Zones / Hide Zones": toggle_zones_button,
+            "Delete All Zones": delete_all_zones_button,
         },
         combos={
             "Provider": provider_combo,
@@ -518,7 +681,12 @@ def _build_window(QtWidgets: Any, presenter: ControlPanelPresenter) -> Any:
             "Panel Opacity": overlay_opacity,
         },
         double_spinboxes={"Change Threshold": change_threshold},
-        checkboxes={"Debug Overlay": debug_overlay, "Debug Logs": debug_mode},
+        checkboxes={
+            "Debug Overlay": debug_overlay,
+            "Debug Logs": debug_mode,
+            "Edit Zones": edit_zones_checkbox,
+        },
+        tables={"Zones": zones_table},
     )
     return window
 
@@ -532,6 +700,7 @@ def _register_test_controls(
     spinboxes: dict[str, Any],
     double_spinboxes: dict[str, Any],
     checkboxes: dict[str, Any],
+    tables: dict[str, Any],
 ) -> None:
     for attr, values in {
         "buttons": buttons,
@@ -540,6 +709,7 @@ def _register_test_controls(
         "spinboxes": spinboxes,
         "double_spinboxes": double_spinboxes,
         "checkboxes": checkboxes,
+        "tables": tables,
     }.items():
         target = getattr(window, attr, None)
         if isinstance(target, dict):
@@ -554,6 +724,252 @@ def _add_labeled_widget(QtWidgets: Any, layout: Any, label: str, widget: Any) ->
     setattr(widget, "label", label)
     layout.addWidget(QtWidgets.QLabel(label))
     layout.addWidget(widget)
+
+
+class _HotkeyRecorder:
+    def __init__(
+        self,
+        *,
+        label: str,
+        display: Any,
+        button: Any,
+        other_label: str,
+        other_display: Any,
+        presenter: ControlPanelPresenter,
+        QtCore: Any | None,
+    ) -> None:
+        self.label = label
+        self.display = display
+        self.button = button
+        self.other_label = other_label
+        self.other_display = other_display
+        self.presenter = presenter
+        self.QtCore = QtCore
+        self._button_text = _button_text(button)
+        self._recording = False
+        setattr(button, "_hotkey_recorder", self)
+        button.clicked.connect(lambda _checked=False: self.start())
+        if QtCore is not None and hasattr(button, "setFocusPolicy"):
+            focus_policy = getattr(getattr(QtCore.Qt, "FocusPolicy", object()), "StrongFocus", None)
+            if focus_policy is not None:
+                button.setFocusPolicy(focus_policy)
+
+    def start(self) -> None:
+        self._recording = True
+        if hasattr(self.button, "setText"):
+            self.button.setText("Press key combination...")
+        if hasattr(self.button, "setFocus"):
+            self.button.setFocus()
+
+    def record_key(self, key: str, *, modifiers: tuple[str, ...] = ()) -> bool:
+        hotkey = _format_hotkey(key, modifiers)
+        if hotkey is None:
+            self.presenter.report_error(f"{self.label} cannot be empty")
+            self._finish()
+            return False
+        return self._accept_hotkey(hotkey)
+
+    def handle_key_event(self, event: Any) -> bool:
+        if not self._recording:
+            return False
+        hotkey = _hotkey_from_qt_event(event, self.QtCore)
+        if hotkey is None:
+            self.presenter.report_error(f"{self.label} cannot be empty")
+            self._finish()
+            return True
+        self._accept_hotkey(hotkey)
+        return True
+
+    def _accept_hotkey(self, hotkey: str) -> bool:
+        try:
+            normalized = validate_hotkey_text(hotkey)
+            other = validate_hotkey_text(self.other_display.text())
+        except Exception as exc:
+            self.presenter.report_error(exc)
+            self._finish()
+            return False
+        if normalized == other:
+            self.presenter.report_error(f"{self.label} duplicates {self.other_label}")
+            self._finish()
+            return False
+        self.display.setText(_display_hotkey(normalized))
+        self._finish()
+        return True
+
+    def _finish(self) -> None:
+        self._recording = False
+        if hasattr(self.button, "setText"):
+            self.button.setText(self._button_text)
+
+
+def _hotkey_record_button(QtWidgets: Any, QtCore: Any | None) -> type[Any]:
+    del QtCore
+
+    class HotkeyRecordButton(QtWidgets.QPushButton):  # type: ignore[misc]
+        def keyPressEvent(self, event: Any) -> None:
+            recorder = getattr(self, "_hotkey_recorder", None)
+            if recorder is not None and recorder.handle_key_event(event):
+                return
+            parent = super()
+            key_press = getattr(parent, "keyPressEvent", None)
+            if callable(key_press):
+                key_press(event)
+
+    return HotkeyRecordButton
+
+
+def _display_hotkey(text: str) -> str:
+    try:
+        text = validate_hotkey_text(text)
+    except Exception:
+        text = text.strip()
+    return " + ".join(part.strip() for part in text.split("+") if part.strip())
+
+
+def _button_text(button: Any) -> str:
+    text = getattr(button, "text", "")
+    if callable(text):
+        return str(text())
+    return str(text)
+
+
+def _format_hotkey(key: str, modifiers: tuple[str, ...] = ()) -> str | None:
+    key = key.strip()
+    if not key:
+        return None
+    normalized_key = _format_key_label(key)
+    if normalized_key is None:
+        return None
+    ordered_modifiers = _ordered_modifiers(modifiers)
+    if normalized_key in {"Ctrl", "Shift", "Alt", "Win"}:
+        return None
+    return " + ".join([*ordered_modifiers, normalized_key])
+
+
+def _format_key_label(key: str) -> str | None:
+    normalized = key.strip().lower()
+    if normalized in {"esc", "escape"}:
+        return "Esc"
+    if len(normalized) == 1 and normalized.isalnum():
+        return normalized.upper()
+    if normalized.startswith("f") and normalized[1:].isdigit():
+        index = int(normalized[1:])
+        if 1 <= index <= 24:
+            return f"F{index}"
+    if normalized in {"ctrl", "control"}:
+        return "Ctrl"
+    if normalized == "shift":
+        return "Shift"
+    if normalized == "alt":
+        return "Alt"
+    if normalized in {"win", "windows", "meta"}:
+        return "Win"
+    return None
+
+
+def _ordered_modifiers(modifiers: tuple[str, ...]) -> list[str]:
+    labels = {_format_key_label(modifier) for modifier in modifiers}
+    return [label for label in ("Ctrl", "Alt", "Shift", "Win") if label in labels]
+
+
+def _hotkey_from_qt_event(event: Any, QtCore: Any | None) -> str | None:
+    key = _qt_event_key_label(event, QtCore)
+    modifiers = _qt_event_modifiers(event, QtCore)
+    if key is None:
+        return None
+    return _format_hotkey(key, modifiers=tuple(modifiers))
+
+
+def _qt_event_key_label(event: Any, QtCore: Any | None) -> str | None:
+    text = ""
+    event_text = getattr(event, "text", None)
+    if callable(event_text):
+        text = str(event_text())
+    if text and text.strip():
+        return text.strip()
+    key_getter = getattr(event, "key", None)
+    if not callable(key_getter):
+        return None
+    key_value = _enum_int(key_getter())
+    if QtCore is not None:
+        key_container = getattr(QtCore.Qt, "Key", None)
+        key_names = {
+            "Key_Escape": "Esc",
+            **{f"Key_F{index}": f"F{index}" for index in range(1, 25)},
+        }
+        for name, label in key_names.items():
+            value = getattr(key_container, name, None) if key_container is not None else None
+            if value is not None and _enum_int(value) == key_value:
+                return label
+        for name in ("Key_Control", "Key_Shift", "Key_Alt", "Key_Meta"):
+            value = getattr(key_container, name, None) if key_container is not None else None
+            if value is not None and _enum_int(value) == key_value:
+                return None
+    if 48 <= key_value <= 57 or 65 <= key_value <= 90:
+        return chr(key_value)
+    return None
+
+
+def _qt_event_modifiers(event: Any, QtCore: Any | None) -> list[str]:
+    modifiers_getter = getattr(event, "modifiers", None)
+    if not callable(modifiers_getter) or QtCore is None:
+        return []
+    modifiers = modifiers_getter()
+    keyboard_modifier = getattr(QtCore.Qt, "KeyboardModifier", None)
+    candidates = (
+        ("Ctrl", "ControlModifier"),
+        ("Alt", "AltModifier"),
+        ("Shift", "ShiftModifier"),
+        ("Win", "MetaModifier"),
+    )
+    result: list[str] = []
+    for label, name in candidates:
+        value = getattr(keyboard_modifier, name, None) if keyboard_modifier is not None else None
+        if value is not None and _flag_set(modifiers, value):
+            result.append(label)
+    return result
+
+
+def _flag_set(flags: Any, flag: Any) -> bool:
+    try:
+        return bool(flags & flag)
+    except TypeError:
+        return bool(_enum_int(flags) & _enum_int(flag))
+
+
+def _enum_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(getattr(value, "value", 0))
+
+
+def _add_diagnostic_groups(
+    QtWidgets: Any,
+    layout: Any,
+    groups: dict[str, list[str]],
+) -> dict[str, Any]:
+    labels: dict[str, Any] = {}
+    for title in ("Translation", "OCR", "Gaming", "Latency", "Zones", "General"):
+        rows = groups.get(title, [])
+        group = QtWidgets.QGroupBox(title) if hasattr(QtWidgets, "QGroupBox") else _new_tab(QtWidgets)
+        setattr(group, "title", title)
+        group_layout = QtWidgets.QVBoxLayout(group)
+        label = QtWidgets.QLabel(_diagnostic_text(rows))
+        group_layout.addWidget(label)
+        layout.addWidget(group)
+        labels[title] = label
+    return labels
+
+
+def _refresh_diagnostic_groups(labels: dict[str, Any], groups: dict[str, list[str]]) -> None:
+    for title, label in labels.items():
+        label.setText(_diagnostic_text(groups.get(title, [])))
+
+
+def _diagnostic_text(rows: list[str]) -> str:
+    return "\n".join(rows) if rows else "No data"
+
 
 
 def _combo_box(

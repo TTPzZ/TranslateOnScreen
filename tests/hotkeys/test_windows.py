@@ -49,6 +49,15 @@ def test_hotkey_spec_from_text_supports_escape_and_letter_keys() -> None:
     assert letter.label == "Q"
 
 
+def test_hotkey_spec_from_text_supports_function_keys() -> None:
+    spec = hotkey_spec_from_text("Shift + F1", identifier=7)
+
+    assert spec.modifiers == MOD_SHIFT
+    assert spec.key_code == 0x70
+    assert spec.identifier == 7
+    assert spec.label == "Shift+F1"
+
+
 def test_windows_hotkey_registers_and_unregisters_default_hotkey() -> None:
     user32 = FakeUser32()
     manager = WindowsGlobalHotkey(callback=lambda: None, user32=user32)

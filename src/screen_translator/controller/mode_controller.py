@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import logging
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from time import perf_counter
 from typing import Protocol
+from uuid import uuid4
 
 from screen_translator.controller.state import ModeState
-from screen_translator.domain.models import ScreenRegion
+from screen_translator.domain.models import OverlayStyleMode, ScreenRegion, TranslationZone, TranslationZoneMode
 from screen_translator.instrumentation import RuntimeMetrics
+from screen_translator.overlay.zones import ZoneOverlayCallbacks
 from screen_translator.ui.server_process import LocalServerController
 from screen_translator.ui.settings import ControlPanelSettings, SettingsStore
 
@@ -24,6 +27,9 @@ class ReadingRunner(Protocol):
     def start(self, region: ScreenRegion) -> None:
         """Start Reading Mode for a region."""
 
+    def start_zones(self, zones: object) -> None:
+        """Start Reading Mode for persistent zones."""
+
     def stop(self) -> None:
         """Stop Reading Mode."""
 
@@ -31,9 +37,29 @@ class ReadingRunner(Protocol):
         """Clear Reading Mode overlay items."""
 
 
+class ZoneOverlay(Protocol):
+    def set_callbacks(self, callbacks: ZoneOverlayCallbacks) -> None:
+        """Set callbacks for toolbar actions."""
+
+    def show_zones(
+        self,
+        zones: tuple[TranslationZone, ...],
+        *,
+        edit_mode: bool = False,
+        show_borders: bool = True,
+    ) -> None:
+        """Show zone borders."""
+
+    def clear(self) -> None:
+        """Clear zone borders."""
+
+
 class GamingPipeline(Protocol):
     def run_once(self, region: ScreenRegion | None = None) -> bool:
         """Run one Gaming Mode translation for a selected region."""
+
+    def run_zones(self, zones: tuple[TranslationZone, ...]) -> bool:
+        """Run one Gaming Mode translation pass for zones."""
 
     def clear_overlay(self) -> None:
         """Clear Gaming Mode overlay items."""
@@ -63,6 +89,9 @@ class ModeController:
         settings_store: SettingsStore | None = None,
         server_controller: LocalServerController | None = None,
         runtime_settings_applier: RuntimeSettingsApplier | None = None,
+        zone_id_factory: Callable[[], str] | None = None,
+        timestamp_factory: Callable[[], str] | None = None,
+        zone_overlay: ZoneOverlay | None = None,
     ) -> None:
         self._selector = selector
         self._reading_runner = reading_runner
@@ -73,16 +102,21 @@ class ModeController:
         self._settings_store = settings_store
         self._server_controller = server_controller
         self._runtime_settings_applier = runtime_settings_applier
+        self._zone_id_factory = zone_id_factory or (lambda: uuid4().hex)
+        self._timestamp_factory = timestamp_factory or _utc_timestamp
+        self._zone_overlay = zone_overlay
         self.gaming_hotkey_status = gaming_hotkey_status
         self.gaming_dismiss_hotkey_status = gaming_dismiss_hotkey_status
         self.gaming_dismiss_hotkey_label = gaming_dismiss_hotkey_label or self._settings.gaming_dismiss_hotkey
         self.debug_mode = debug_mode
+        self.edit_zones_enabled = False
         self.state = ModeState.IDLE
         self.current_region: ScreenRegion | None = None
         self.gaming_enabled = True
         self.last_hotkey_event_time = "never"
         self.last_error: str | None = None
         self.status_message = "Ready"
+        self._install_zone_overlay_callbacks()
 
     def select_region(self) -> bool:
         self.state = ModeState.SELECTING_REGION
@@ -109,14 +143,190 @@ class ModeController:
         self.status_message = "Ready"
         return True
 
+    def zones(self) -> tuple[TranslationZone, ...]:
+        return self._settings.zones
+
+    def add_zone(self) -> bool:
+        try:
+            region = self._selector.select_region()
+        except Exception as exc:
+            self._set_error(exc)
+            return False
+        if region is None:
+            return False
+
+        now = self._timestamp_factory()
+        zone = TranslationZone(
+            id=self._zone_id_factory(),
+            name=f"Zone {len(self._settings.zones) + 1}",
+            region=region,
+            mode=TranslationZoneMode.READING,
+            overlay_style=OverlayStyleMode.FLOATING_PANEL,
+            created_at=now,
+            updated_at=now,
+        )
+        return self._replace_settings(
+            zones=(*self._settings.zones, zone),
+            status="Zone added",
+        )
+
+    def delete_zone(self, zone_id: str) -> bool:
+        zones = tuple(zone for zone in self._settings.zones if zone.id != zone_id)
+        if len(zones) == len(self._settings.zones):
+            self._set_error(f"Zone not found: {zone_id}")
+            return False
+        if not self._replace_settings(zones=zones, status="Zone deleted"):
+            return False
+        return self._clear_reading_overlay()
+
+    def rename_zone(self, zone_id: str, name: str) -> bool:
+        name = name.strip()
+        if not name:
+            self._set_error("Zone name must not be empty")
+            return False
+        return self._update_zone(
+            zone_id,
+            lambda zone: replace(zone, name=name, updated_at=self._timestamp_factory()),
+            "Zone renamed",
+        )
+
+    def toggle_zone_visible(self, zone_id: str) -> bool:
+        return self._update_zone(
+            zone_id,
+            lambda zone: replace(zone, visible=not zone.visible, updated_at=self._timestamp_factory()),
+            "Zone visibility updated",
+        )
+
+    def toggle_zone_enabled(self, zone_id: str) -> bool:
+        return self._update_zone(
+            zone_id,
+            lambda zone: replace(zone, enabled=not zone.enabled, updated_at=self._timestamp_factory()),
+            "Zone translation updated",
+        )
+
+    def set_zone_overlay_style(self, zone_id: str, style: str) -> bool:
+        try:
+            overlay_style = OverlayStyleMode(style)
+        except ValueError as exc:
+            self._set_error(exc)
+            return False
+        return self._update_zone(
+            zone_id,
+            lambda zone: replace(
+                zone,
+                overlay_style=overlay_style,
+                updated_at=self._timestamp_factory(),
+            ),
+            "Zone style updated",
+        )
+
+    def set_zone_mode(self, zone_id: str, mode: str) -> bool:
+        try:
+            zone_mode = TranslationZoneMode(mode)
+        except ValueError as exc:
+            self._set_error(exc)
+            return False
+        return self._update_zone(
+            zone_id,
+            lambda zone: replace(
+                zone,
+                mode=zone_mode,
+                updated_at=self._timestamp_factory(),
+            ),
+            "Zone mode updated",
+        )
+
+    def edit_zone_position(self, zone_id: str) -> bool:
+        try:
+            region = self._selector.select_region()
+        except Exception as exc:
+            self._set_error(exc)
+            return False
+        if region is None:
+            return False
+        return self._update_zone(
+            zone_id,
+            lambda zone: replace(
+                zone,
+                region=region,
+                updated_at=self._timestamp_factory(),
+            ),
+            "Zone position updated",
+        )
+
+    def show_all_zones(self) -> bool:
+        now = self._timestamp_factory()
+        zones = tuple(replace(zone, visible=True, updated_at=now) for zone in self._settings.zones)
+        return self._replace_settings(zones=zones, status="All zones shown")
+
+    def hide_all_zones(self) -> bool:
+        now = self._timestamp_factory()
+        zones = tuple(replace(zone, visible=False, updated_at=now) for zone in self._settings.zones)
+        return self._replace_settings(zones=zones, status="All zones hidden")
+
+    def toggle_zone_borders(self) -> bool:
+        if self._settings.show_zone_borders:
+            return self._replace_settings(
+                show_zone_borders=False,
+                status="Zones hidden",
+            )
+        return self._replace_settings(
+            show_zone_borders=True,
+            status="Zones shown",
+        )
+
+    def delete_all_zones(self) -> bool:
+        if not self._replace_settings(zones=(), status="All zones deleted"):
+            return False
+        return self._clear_reading_overlay()
+
+    def clear_zone_borders(self) -> bool:
+        if self._zone_overlay is not None:
+            try:
+                self._zone_overlay.clear()
+            except Exception as exc:
+                self._set_error(exc)
+                return False
+        self.status_message = "Zone borders cleared"
+        self.last_error = None
+        return True
+
+    def set_edit_zones_enabled(self, enabled: bool) -> bool:
+        self.edit_zones_enabled = enabled
+        if not self._refresh_zone_overlay():
+            return False
+        self.status_message = f"Edit Zones {'enabled' if enabled else 'disabled'}"
+        self.last_error = None
+        return True
+
+    def clear_all_translations(self) -> bool:
+        if not self._clear_reading_overlay():
+            return False
+        self.status_message = "Translations cleared"
+        self.last_error = None
+        return True
+
     def start_reading_mode(self) -> bool:
+        if self._reading_runner is None:
+            self._set_error("Reading Mode runner is unavailable")
+            return False
+
+        reading_zones = self._reading_zones()
+        if self._settings.zones:
+            try:
+                self._reading_runner.start_zones(reading_zones)
+            except Exception as exc:
+                self._set_error(exc)
+                return False
+            self.state = ModeState.READING_RUNNING
+            self.last_error = None
+            self.status_message = "Running Reading Mode"
+            return True
+
         if self.current_region is None and not self.select_region():
             return False
         if self.current_region is None:
             self._set_error("Invalid selected region")
-            return False
-        if self._reading_runner is None:
-            self._set_error("Reading Mode runner is unavailable")
             return False
 
         try:
@@ -146,7 +356,8 @@ class ModeController:
         self.gaming_enabled = enabled
 
     def run_gaming_translation_once(self) -> bool:
-        if self.current_region is None:
+        gaming_zones = self._gaming_zones()
+        if not gaming_zones and self.current_region is None:
             self._set_error("Select a region before running Gaming Mode")
             return False
         if self._gaming_pipeline is None:
@@ -168,7 +379,10 @@ class ModeController:
             self.state = ModeState.GAMING_READY
 
         try:
-            result = self._gaming_pipeline.run_once(self.current_region)
+            if gaming_zones:
+                result = self._gaming_pipeline.run_zones(gaming_zones)
+            else:
+                result = self._gaming_pipeline.run_once(self.current_region)
         except Exception as exc:
             self._set_error(exc)
             return False
@@ -231,6 +445,9 @@ class ModeController:
                 messages = []
         except Exception as exc:
             self._set_error(exc)
+            return False
+
+        if not self._refresh_zone_overlay():
             return False
 
         if restart_required:
@@ -298,9 +515,15 @@ class ModeController:
         return result
 
     def diagnostic_lines(self) -> list[str]:
-        if self._runtime_metrics is None:
-            return []
-        return self._runtime_metrics.diagnostic_lines()
+        lines = [] if self._runtime_metrics is None else self._runtime_metrics.diagnostic_lines()
+        lines.extend(
+            [
+                f"Reading Zones: {len(self._zones_for_mode(TranslationZoneMode.READING))}",
+                f"Gaming Zones: {len(self._zones_for_mode(TranslationZoneMode.GAMING))}",
+                f"Both Zones: {len(self._zones_for_mode(TranslationZoneMode.BOTH))}",
+            ]
+        )
+        return lines
 
     def report_hotkey_registered(self) -> None:
         self.gaming_hotkey_status = "registered"
@@ -321,8 +544,108 @@ class ModeController:
     def report_error(self, error: Exception | str) -> None:
         self._set_error(error)
 
+    def _replace_settings(self, *, status: str, **updates: object) -> bool:
+        try:
+            self._settings = self._settings.with_updates(**updates)
+            if self._settings_store is not None:
+                self._settings_store.save(self._settings)
+            if self._runtime_settings_applier is not None:
+                self._runtime_settings_applier(self._settings)
+        except Exception as exc:
+            self._set_error(exc)
+            return False
+        if not self._refresh_zone_overlay():
+            return False
+        self.status_message = status
+        self.last_error = None
+        return True
+
+    def _update_zone(
+        self,
+        zone_id: str,
+        update: Callable[[TranslationZone], TranslationZone],
+        status: str,
+    ) -> bool:
+        changed = False
+        zones: list[TranslationZone] = []
+        for zone in self._settings.zones:
+            if zone.id == zone_id:
+                zones.append(update(zone))
+                changed = True
+            else:
+                zones.append(zone)
+        if not changed:
+            self._set_error(f"Zone not found: {zone_id}")
+            return False
+        return self._replace_settings(zones=tuple(zones), status=status)
+
+    def _refresh_zone_overlay(self) -> bool:
+        if self._zone_overlay is None:
+            return True
+        try:
+            if not self._settings.show_zone_borders:
+                self._zone_overlay.clear()
+                return True
+            self._zone_overlay.show_zones(
+                self._settings.zones,
+                edit_mode=self.edit_zones_enabled,
+                show_borders=self._settings.show_zone_borders,
+            )
+        except Exception as exc:
+            self._set_error(exc)
+            return False
+        return True
+
+    def _install_zone_overlay_callbacks(self) -> None:
+        if self._zone_overlay is None:
+            return
+        set_callbacks = getattr(self._zone_overlay, "set_callbacks", None)
+        if not callable(set_callbacks):
+            return
+        set_callbacks(
+            ZoneOverlayCallbacks(
+                on_delete=self.delete_zone,
+                on_move=self.edit_zone_position,
+                on_style_change=self.set_zone_overlay_style,
+                on_mode_change=self.set_zone_mode,
+            )
+        )
+
+    def _reading_zones(self) -> tuple[TranslationZone, ...]:
+        return tuple(
+            zone
+            for zone in self._settings.zones
+            if zone.enabled and zone.mode in {TranslationZoneMode.READING, TranslationZoneMode.BOTH}
+        )
+
+    def _gaming_zones(self) -> tuple[TranslationZone, ...]:
+        gaming = self._zones_for_mode(TranslationZoneMode.GAMING)
+        both = self._zones_for_mode(TranslationZoneMode.BOTH)
+        return (*gaming, *both)
+
+    def _zones_for_mode(self, mode: TranslationZoneMode) -> tuple[TranslationZone, ...]:
+        return tuple(
+            zone
+            for zone in self._settings.zones
+            if zone.enabled and zone.mode == mode
+        )
+
+    def _clear_reading_overlay(self) -> bool:
+        if self._reading_runner is None:
+            return True
+        try:
+            self._reading_runner.clear_overlay()
+        except Exception as exc:
+            self._set_error(exc)
+            return False
+        return True
+
     def _set_error(self, error: Exception | str) -> None:
         self.last_error = str(error)
         self.state = ModeState.ERROR
         self.status_message = "Error"
         logger.error("%s", self.last_error)
+
+
+def _utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")

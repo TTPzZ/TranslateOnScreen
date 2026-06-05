@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 from screen_translator.app import GamingModePipeline
+from screen_translator.capture.overlay_guard import OverlayCaptureGuard
 from screen_translator.config import AppConfig
 from screen_translator.domain.models import (
     CapturedImage,
@@ -10,6 +11,8 @@ from screen_translator.domain.models import (
     ScreenRegion,
     TranslationRequest,
     TranslationResult,
+    TranslationZone,
+    TranslationZoneMode,
 )
 
 
@@ -44,6 +47,17 @@ class FakeOcr:
 
     def extract_text(self, captured: CapturedImage) -> list[OcrTextBlock]:
         del captured
+        self.calls += 1
+        return self.blocks
+
+
+class RecordingOcr(FakeOcr):
+    def __init__(self, blocks: list[OcrTextBlock]) -> None:
+        super().__init__(blocks)
+        self.payloads: list[object] = []
+
+    def extract_text(self, captured: CapturedImage) -> list[OcrTextBlock]:
+        self.payloads.append(captured.image)
         self.calls += 1
         return self.blocks
 
@@ -90,6 +104,33 @@ class FakeOverlay:
     def clear_after(self, ttl_ms: int) -> None:
         self.events.append("clear_after")
         self.clear_after_calls.append(ttl_ms)
+
+
+class VisibleOverlay(FakeOverlay):
+    def __init__(self) -> None:
+        super().__init__()
+        self.visible = True
+
+    def hide_for_capture(self) -> None:
+        self.events.append("hide")
+        self.visible = False
+
+    def restore_after_capture(self) -> None:
+        self.events.append("restore")
+        self.visible = True
+
+
+class OverlaySensitiveCapture:
+    def __init__(self, overlay: VisibleOverlay) -> None:
+        self.overlay = overlay
+        self.calls: list[ScreenRegion] = []
+        self.images: list[str] = []
+
+    def capture(self, region: ScreenRegion) -> CapturedImage:
+        self.calls.append(region)
+        image = "overlay-text" if self.overlay.visible else "source-text"
+        self.images.append(image)
+        return CapturedImage(region=region, image=image)
 
 
 def normal_config() -> AppConfig:
@@ -170,7 +211,26 @@ def test_pipeline_saves_cache_miss_before_showing_overlay() -> None:
     assert [item.text for item in overlay.items] == ["Xin chao"]
 
 
-def test_pipeline_clears_old_gaming_overlay_and_schedules_ttl_before_new_result() -> None:
+def test_pipeline_clears_old_gaming_overlay_and_does_not_auto_hide_by_default() -> None:
+    region = ScreenRegion(10, 20, 100, 30)
+    overlay = FakeOverlay()
+    pipeline = GamingModePipeline(
+        selector=FakeSelector(region),
+        capture=FakeCapture(),
+        ocr=FakeOcr([OcrTextBlock("Hello", 0.95, ScreenRegion(0, 0, 100, 30))]),
+        cache=FakeCache(),
+        translation_client=FakeTranslationClient(),
+        overlay=overlay,
+        config=normal_config(),
+    )
+
+    pipeline.run_once()
+
+    assert overlay.events == ["clear", "show"]
+    assert overlay.clear_after_calls == []
+
+
+def test_pipeline_schedules_optional_ttl_when_configured() -> None:
     region = ScreenRegion(10, 20, 100, 30)
     overlay = FakeOverlay()
     pipeline = GamingModePipeline(
@@ -192,6 +252,73 @@ def test_pipeline_clears_old_gaming_overlay_and_schedules_ttl_before_new_result(
 
     assert overlay.events == ["clear", "show", "clear_after"]
     assert overlay.clear_after_calls == [1234]
+
+
+def test_pipeline_hides_overlays_during_capture_before_ocr(caplog) -> None:
+    region = ScreenRegion(10, 20, 100, 30)
+    overlay = VisibleOverlay()
+    capture = OverlaySensitiveCapture(overlay)
+    ocr = RecordingOcr([OcrTextBlock("Hello", 0.95, ScreenRegion(0, 0, 100, 30))])
+    pipeline = GamingModePipeline(
+        selector=FakeSelector(region),
+        capture=capture,
+        ocr=ocr,
+        cache=FakeCache(TranslationResult("Xin chao", "en", "vi", "google", cached=True)),
+        translation_client=FakeTranslationClient(),
+        overlay=overlay,
+        config=normal_config(),
+        capture_guard=OverlayCaptureGuard([overlay]),
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        pipeline.run_once()
+
+    assert capture.images == ["source-text"]
+    assert ocr.payloads == ["source-text"]
+    assert overlay.visible is True
+    assert overlay.events[:2] == ["hide", "restore"]
+    assert "capture_without_overlays=true" in caplog.text
+    assert "capture guard enter" in caplog.text
+    assert "capture started" in caplog.text
+    assert "capture finished" in caplog.text
+
+
+def test_pipeline_runs_gaming_zones_and_renders_combined_overlay() -> None:
+    zone_gaming = TranslationZone(
+        id="zone-gaming",
+        name="Gaming",
+        region=ScreenRegion(10, 20, 100, 30),
+        mode=TranslationZoneMode.GAMING,
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    zone_both = TranslationZone(
+        id="zone-both",
+        name="Both",
+        region=ScreenRegion(200, 20, 100, 30),
+        mode=TranslationZoneMode.BOTH,
+        overlay_style="inline_replace",
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    capture = FakeCapture([b"gaming", b"both"])
+    overlay = FakeOverlay()
+    pipeline = GamingModePipeline(
+        selector=FakeSelector(None),
+        capture=capture,
+        ocr=FakeOcr([OcrTextBlock("Hello", 0.95, ScreenRegion(0, 0, 100, 30))]),
+        cache=FakeCache(),
+        translation_client=FakeTranslationClient(),
+        overlay=overlay,
+        config=normal_config(),
+    )
+
+    assert pipeline.run_zones((zone_gaming, zone_both)) is True
+
+    assert capture.calls == [zone_gaming.region, zone_both.region]
+    assert overlay.events == ["clear", "show"]
+    assert [item.zone_id for item in overlay.items] == ["zone-gaming", "zone-both"]
+    assert [item.style for item in overlay.items] == ["floating_panel", "inline_replace"]
 
 
 def test_pipeline_merges_paragraph_ocr_blocks_into_one_translation_request(

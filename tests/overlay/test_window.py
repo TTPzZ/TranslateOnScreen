@@ -113,6 +113,96 @@ def test_blur_overlay_window_auto_hides_after_ttl(
     assert windows[0].closed is True
 
 
+def test_blur_overlay_window_hides_and_restores_for_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    labels: list[object] = []
+    windows: list[object] = []
+    _install_fake_qt(monkeypatch, labels, windows=windows)
+    overlay = BlurOverlayWindow()
+    overlay.show_items(
+        [OverlayItem(text="Xin chao", region=ScreenRegion(10, 20, 140, 36))]
+    )
+
+    overlay.hide_for_capture()
+    overlay.restore_after_capture()
+
+    assert windows[0].hide_calls == 1
+    assert windows[0].fullscreen_calls == 2
+
+
+def test_blur_overlay_window_hides_only_items_intersecting_capture_region(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    labels: list[object] = []
+    windows: list[object] = []
+    _install_fake_qt(monkeypatch, labels, windows=windows)
+    overlay = BlurOverlayWindow()
+    overlay.show_items(
+        [
+            OverlayItem(text="Overlap", region=ScreenRegion(10, 20, 140, 36)),
+            OverlayItem(text="Outside", region=ScreenRegion(400, 20, 140, 36)),
+        ]
+    )
+
+    result = overlay.hide_for_capture_regions((ScreenRegion(0, 0, 200, 100),))
+
+    assert result == (1, 1)
+    assert labels[0].visible is False
+    assert labels[1].visible is True
+    assert windows[0].hide_calls == 0
+
+    overlay.restore_after_capture()
+
+    assert labels[0].visible is True
+    assert labels[1].visible is True
+    assert windows[0].fullscreen_calls == 1
+
+
+def test_blur_overlay_window_skips_non_overlapping_items_without_hiding_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    labels: list[object] = []
+    windows: list[object] = []
+    _install_fake_qt(monkeypatch, labels, windows=windows)
+    overlay = BlurOverlayWindow()
+    overlay.show_items(
+        [OverlayItem(text="Outside", region=ScreenRegion(400, 20, 140, 36))]
+    )
+
+    result = overlay.hide_for_capture_regions((ScreenRegion(0, 0, 200, 100),))
+    overlay.restore_after_capture()
+
+    assert result == (0, 1)
+    assert labels[0].visible is True
+    assert windows[0].hide_calls == 0
+    assert windows[0].fullscreen_calls == 1
+
+
+def test_blur_overlay_window_renders_inline_item_style(monkeypatch: pytest.MonkeyPatch) -> None:
+    labels: list[object] = []
+    _install_fake_qt(monkeypatch, labels)
+
+    BlurOverlayWindow().show_items(
+        [
+            OverlayItem(
+                text="Xin chao",
+                region=ScreenRegion(10, 20, 140, 36),
+                style="inline_replace",
+                font_size=12,
+                padding=6,
+                overflow=True,
+            )
+        ]
+    )
+
+    assert labels[0].text == "Xin chao..."
+    assert labels[0].word_wrap is True
+    assert "font-size: 12px;" in labels[0].stylesheet
+    assert "padding: 6px;" in labels[0].stylesheet
+    assert "border-radius: 2px;" in labels[0].stylesheet
+
+
 def test_clamp_items_to_window_keeps_panels_non_overlapping_near_bottom() -> None:
     class Window:
         def width(self) -> int:
@@ -184,6 +274,8 @@ def _install_fake_qt(
     class QWidget:
         def __init__(self) -> None:
             self.fullscreen = False
+            self.fullscreen_calls = 0
+            self.hide_calls = 0
             self.attributes = set()
             self.auto_fill_background = None
             self.paint_fill_calls = []
@@ -201,6 +293,11 @@ def _install_fake_qt(
 
         def showFullScreen(self) -> None:
             self.fullscreen = True
+            self.fullscreen_calls += 1
+
+        def hide(self) -> None:
+            self.fullscreen = False
+            self.hide_calls += 1
 
         def winId(self) -> int:
             return 99
@@ -231,6 +328,10 @@ def _install_fake_qt(
 
         def show(self) -> None:
             self.visible = True
+
+        def hide(self) -> None:
+            self.visible = False
+            self.hide_calls = getattr(self, "hide_calls", 0) + 1
 
     qt_core = types.ModuleType("PyQt6.QtCore")
     qt_core.Qt = Qt

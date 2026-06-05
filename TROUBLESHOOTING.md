@@ -83,7 +83,8 @@ Tune overlay readability:
 
 ```powershell
 # Auto-hide Gaming Mode overlays after this many milliseconds.
-$env:SCREEN_TRANSLATOR_GAMING_OVERLAY_TTL_MS = "5000"
+# 0 keeps the overlay until Esc or Clear Gaming Overlay.
+$env:SCREEN_TRANSLATOR_GAMING_OVERLAY_TTL_MS = "0"
 
 # Reuse OCR results for unchanged Gaming Mode captures.
 $env:SCREEN_TRANSLATOR_GAMING_OCR_CACHE_TTL_MS = "10000"
@@ -101,9 +102,13 @@ $env:SCREEN_TRANSLATOR_OVERLAY_FONT_SIZE = "18"
 $env:SCREEN_TRANSLATOR_OVERLAY_PANEL_OPACITY = "150"
 ```
 
-If old Gaming Mode text appears stacked, start a fresh run after updating; new Gaming Mode results clear previous Gaming overlays before rendering and auto-hide after the TTL.
+If old Gaming Mode text appears stacked, start a fresh run after updating; new Gaming Mode results clear previous Gaming overlays before rendering and stay visible until dismissed when the TTL is 0.
 
 If Gaming Mode appears to freeze or dim the whole screen, update and retry with the latest overlay window changes. The overlay host should be transparent and click-through outside translation panels; only the panel rectangles should have a visible background.
+
+## OCR reads translated overlay text
+
+Enable debug logs and confirm each capture logs `capture_without_overlays=true`, `overlays hidden before capture`, and `overlays restored after capture`. Reading Mode and Gaming Mode should hide app-owned translation and zone border overlays only for the capture moment, then restore them before rendering continues.
 
 ## Stop Reading Mode leaves text visible
 

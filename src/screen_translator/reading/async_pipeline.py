@@ -26,11 +26,17 @@ class ReadingJobPipeline(Protocol):
     def set_region(self, region: ScreenRegion) -> None:
         """Set the region watched by Reading Mode."""
 
+    def set_zones(self, zones: object) -> None:
+        """Set persistent zones watched by Reading Mode."""
+
     def capture_frame(self) -> CapturedImage:
         """Capture the current watched region."""
 
     def process_captured_frame(self, captured: CapturedImage) -> ReadingJobResult:
         """Run non-UI work for one captured frame."""
+
+    def process_next_frame(self) -> ReadingJobResult:
+        """Capture and process the next Reading Mode frame or zone batch."""
 
     def apply_result(self, result: ReadingJobResult) -> None:
         """Apply overlay/UI changes on the UI thread."""
@@ -79,6 +85,13 @@ class AsyncReadingModeRunner:
         self._metrics.record_mode_start()
         self._timer.start(self._interval_ms)
 
+    def start_zones(self, zones: object) -> None:
+        self._pipeline.set_zones(zones)
+        self._running = True
+        self._generation += 1
+        self._metrics.record_mode_start()
+        self._timer.start(self._interval_ms)
+
     def stop(self) -> None:
         self._running = False
         self._busy = False
@@ -112,7 +125,7 @@ class AsyncReadingModeRunner:
         job_id = self._job_id
         accepted = self._worker.submit(
             job_id,
-            lambda: self._pipeline.process_captured_frame(self._pipeline.capture_frame()),
+            lambda: self._pipeline.process_next_frame(),
             lambda finished_job_id, result: self._handle_success(
                 generation,
                 finished_job_id,

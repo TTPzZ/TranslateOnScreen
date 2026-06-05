@@ -157,6 +157,10 @@ def _parse_key(token: str) -> tuple[str, int]:
     normalized = token.strip().lower()
     if normalized in {"esc", "escape"}:
         return "Esc", VK_ESCAPE
+    if normalized.startswith("f") and normalized[1:].isdigit():
+        index = int(normalized[1:])
+        if 1 <= index <= 24:
+            return f"F{index}", 0x6F + index
     if len(token) == 1 and token.isalpha():
         label = token.upper()
         return label, ord(label)

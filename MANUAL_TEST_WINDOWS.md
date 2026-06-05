@@ -127,6 +127,7 @@ Googletrans free web smoke test:
 - Confirm overlay updates after visible text changes.
 - Confirm overlay clears after the missing-text timeout.
 - Run Gaming Mode and confirm the screen outside translation panels remains fully transparent and usable.
+- Confirm the Gaming overlay stays visible until dismissed when `SCREEN_TRANSLATOR_GAMING_OVERLAY_TTL_MS` is `0`.
 - Press `Esc` while a Gaming overlay is visible.
 - Expected: Gaming panels disappear immediately and logs include `gaming overlay dismissed by hotkey`.
 - Click Clear Gaming Overlay.
@@ -158,8 +159,8 @@ The debug overlay and logs should warn when total pipeline time, OCR time, or tr
 Gaming overlay controls:
 
 ```powershell
-# Auto-hide one-shot Gaming Mode overlays.
-$env:SCREEN_TRANSLATOR_GAMING_OVERLAY_TTL_MS = "5000"
+# Auto-hide one-shot Gaming Mode overlays. 0 keeps panels until dismissed.
+$env:SCREEN_TRANSLATOR_GAMING_OVERLAY_TTL_MS = "0"
 
 # Reuse OCR results for unchanged Gaming Mode captures.
 $env:SCREEN_TRANSLATOR_GAMING_OCR_CACHE_TTL_MS = "10000"
@@ -202,7 +203,13 @@ Use a small, text-focused region for each scenario:
 
 Expected: after startup warm-up, Gaming Mode hotkey response targets less than 1000 ms for a small unchanged region after a Gaming OCR cache hit. Reading Mode should remain stable during long runs, skip OCR on unchanged frames, and avoid recreating the OCR engine.
 
-For long paragraphs, expect OCR or unofficial web translation to take longer. The required behavior is that old Gaming Mode panels are replaced, panels are readable and non-overlapping, long translations wrap, and the overlay auto-hides after the TTL.
+For long paragraphs, expect OCR or unofficial web translation to take longer. The required behavior is that old Gaming Mode panels are replaced, panels are readable and non-overlapping, long translations wrap, and the overlay remains until dismissed when the TTL is 0.
+
+Inline replacement OCR feedback smoke:
+
+- Create or select an `inline_replace` Reading zone over visible English text.
+- Start Reading Mode and let it run for several ticks.
+- Expected: translated text appears over the source box, logs include `capture_without_overlays=true`, `overlays hidden before capture`, and `overlays restored after capture`, and OCR continues reading the original English source rather than the translated Vietnamese overlay.
 
 ## 12. Test Server Unavailable Behavior
 

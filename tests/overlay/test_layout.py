@@ -5,9 +5,12 @@ import pytest
 from screen_translator.domain.models import OcrTextBlock, ScreenRegion
 from screen_translator.instrumentation import PipelineTimings
 from screen_translator.overlay.layout import (
+    InlineTextLayout,
+    OverlayItem,
     OverlayStyle,
     append_debug_overlay_item,
     build_overlay_items,
+    fit_inline_text,
 )
 
 
@@ -24,6 +27,16 @@ def test_build_overlay_items_pairs_ocr_regions_with_translations() -> None:
         ScreenRegion(10, 20, 100, 30),
         ScreenRegion(40, 80, 120, 40),
     ]
+
+
+def test_overlay_item_defaults_to_floating_without_zone_identity() -> None:
+    item = OverlayItem("Xin chao", ScreenRegion(10, 20, 100, 30))
+
+    assert item.zone_id is None
+    assert item.style == "floating_panel"
+    assert item.font_size is None
+    assert item.padding is None
+    assert item.overflow is False
 
 
 def test_build_overlay_items_converts_relative_ocr_bbox_to_screen_panel() -> None:
@@ -43,6 +56,130 @@ def test_build_overlay_items_converts_relative_ocr_bbox_to_screen_panel() -> Non
     assert items[0].region.y == 456
     assert items[0].region.width >= 100
     assert items[0].region.height >= 30
+
+
+def test_fit_inline_text_converts_zone_relative_bbox_to_absolute_region() -> None:
+    zone = ScreenRegion(100, 200, 300, 160)
+    ocr_box = ScreenRegion(10, 20, 120, 30)
+
+    layout = fit_inline_text(
+        "Xin chao",
+        ocr_box,
+        zone_region=zone,
+        screen_bounds=ScreenRegion(0, 0, 800, 600),
+        min_font_size=8,
+        max_font_size=22,
+        padding=6,
+        allow_expand_ratio=1.5,
+    )
+
+    assert isinstance(layout, InlineTextLayout)
+    assert layout.region.x == 110
+    assert layout.region.y == 220
+    assert layout.region.right <= zone.right
+    assert layout.region.bottom <= zone.bottom
+    assert layout.font_size == 22
+    assert layout.overflow is False
+
+
+def test_fit_inline_text_shrinks_long_vietnamese_text_inside_zone() -> None:
+    zone = ScreenRegion(100, 200, 220, 120)
+    ocr_box = ScreenRegion(10, 20, 140, 36)
+    text = "Day la mot ban dich tieng Viet rat dai can tu dong xuong dong va thu nho"
+
+    layout = fit_inline_text(
+        text,
+        ocr_box,
+        zone_region=zone,
+        screen_bounds=ScreenRegion(0, 0, 800, 600),
+        min_font_size=8,
+        max_font_size=22,
+        padding=6,
+        allow_expand_ratio=1.5,
+    )
+
+    assert 8 <= layout.font_size < 22
+    assert layout.region.right <= zone.right
+    assert layout.region.bottom <= zone.bottom
+    assert layout.overflow is False
+
+
+def test_fit_inline_text_marks_overflow_when_text_still_does_not_fit() -> None:
+    zone = ScreenRegion(100, 200, 120, 60)
+    ocr_box = ScreenRegion(5, 5, 40, 14)
+    text = " ".join(["translation"] * 40)
+
+    layout = fit_inline_text(
+        text,
+        ocr_box,
+        zone_region=zone,
+        screen_bounds=ScreenRegion(0, 0, 800, 600),
+        min_font_size=8,
+        max_font_size=22,
+        padding=6,
+        allow_expand_ratio=1.5,
+    )
+
+    assert layout.font_size == 8
+    assert layout.overflow is True
+    assert layout.region.right <= zone.right
+    assert layout.region.bottom <= zone.bottom
+
+
+def test_build_overlay_items_inline_replace_uses_ocr_bbox_instead_of_floating_panel() -> None:
+    zone = ScreenRegion(100, 200, 300, 160)
+    block = OcrTextBlock("Hello", 0.95, ScreenRegion(10, 20, 120, 30))
+
+    items = build_overlay_items(
+        [block],
+        ["Xin chao"],
+        selected_region=zone,
+        screen_bounds=ScreenRegion(0, 0, 800, 600),
+        overlay_style="inline_replace",
+        zone_id="zone-1",
+        inline_min_font_size=8,
+        inline_max_font_size=22,
+        inline_padding=6,
+        inline_allow_expand_ratio=1.5,
+    )
+
+    assert len(items) == 1
+    assert items[0].zone_id == "zone-1"
+    assert items[0].style == "inline_replace"
+    assert items[0].region.x == 110
+    assert items[0].region.y == 220
+    assert items[0].region.bottom <= zone.bottom
+    assert items[0].font_size == 22
+    assert items[0].padding == 6
+    assert items[0].overflow is False
+
+
+def test_build_overlay_items_inline_replace_uses_one_font_size_per_block() -> None:
+    zone = ScreenRegion(100, 200, 260, 120)
+    blocks = [
+        OcrTextBlock("Short", 0.95, ScreenRegion(10, 10, 120, 28)),
+        OcrTextBlock("Long", 0.95, ScreenRegion(10, 50, 140, 34)),
+    ]
+
+    items = build_overlay_items(
+        blocks,
+        [
+            "Xin chao",
+            "Day la ban dich tieng Viet dai hon can thu nho va xuong dong",
+        ],
+        selected_region=zone,
+        screen_bounds=ScreenRegion(0, 0, 800, 600),
+        overlay_style="inline_replace",
+        zone_id="zone-1",
+        inline_min_font_size=8,
+        inline_max_font_size=22,
+        inline_padding=6,
+        inline_allow_expand_ratio=1.5,
+    )
+
+    assert len(items) == 2
+    assert all(isinstance(item.font_size, int) for item in items)
+    assert items[0].font_size != items[1].font_size
 
 
 def test_build_overlay_items_sizes_vietnamese_translation_beyond_source_bbox() -> None:

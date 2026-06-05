@@ -21,6 +21,20 @@ class OverlayItem:
 
     text: str
     region: ScreenRegion
+    zone_id: str | None = None
+    style: str = "floating_panel"
+    font_size: int | None = None
+    padding: int | None = None
+    overflow: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class InlineTextLayout:
+    """Deterministic inline text placement and fitting result."""
+
+    region: ScreenRegion
+    font_size: int
+    overflow: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,14 +54,48 @@ def build_overlay_items(
     selected_region: ScreenRegion | None = None,
     screen_bounds: ScreenRegion | None = None,
     max_panel_width: int = _MAX_PANEL_WIDTH,
+    overlay_style: str = "floating_panel",
+    zone_id: str | None = None,
+    inline_min_font_size: int = 8,
+    inline_max_font_size: int = 22,
+    inline_padding: int = 6,
+    inline_allow_expand_ratio: float = 1.5,
 ) -> list[OverlayItem]:
     if len(ocr_blocks) != len(translations):
         raise ValueError("translations count must match OCR blocks")
+    if overlay_style not in {"floating_panel", "inline_replace"}:
+        raise ValueError(f"Unsupported overlay style: {overlay_style}")
 
     items: list[OverlayItem] = []
     for block, translation in zip(ocr_blocks, translations, strict=True):
         text = translation.strip()
         if not text:
+            continue
+
+        if overlay_style == "inline_replace":
+            if selected_region is None:
+                raise ValueError("selected_region is required for inline_replace")
+            inline_layout = fit_inline_text(
+                text,
+                block.region,
+                zone_region=selected_region,
+                screen_bounds=screen_bounds,
+                min_font_size=inline_min_font_size,
+                max_font_size=inline_max_font_size,
+                padding=inline_padding,
+                allow_expand_ratio=inline_allow_expand_ratio,
+            )
+            items.append(
+                OverlayItem(
+                    text=text,
+                    region=inline_layout.region,
+                    zone_id=zone_id,
+                    style="inline_replace",
+                    font_size=inline_layout.font_size,
+                    padding=inline_padding,
+                    overflow=inline_layout.overflow,
+                )
+            )
             continue
 
         if selected_region is None:
@@ -62,10 +110,63 @@ def build_overlay_items(
                 screen_bounds=screen_bounds,
                 max_panel_width=max_panel_width,
             )
-        items.append(OverlayItem(text=text, region=region))
-    if selected_region is not None:
+        items.append(
+            OverlayItem(
+                text=text,
+                region=region,
+                zone_id=zone_id,
+                style="floating_panel",
+            )
+        )
+    if selected_region is not None and overlay_style == "floating_panel":
         items = stack_overlay_items(items, screen_bounds)
     return items
+
+
+def fit_inline_text(
+    text: str,
+    ocr_region: ScreenRegion,
+    *,
+    zone_region: ScreenRegion,
+    screen_bounds: ScreenRegion | None,
+    min_font_size: int,
+    max_font_size: int,
+    padding: int,
+    allow_expand_ratio: float,
+) -> InlineTextLayout:
+    if min_font_size <= 0:
+        raise ValueError("min_font_size must be positive")
+    if max_font_size < min_font_size:
+        raise ValueError("max_font_size must be >= min_font_size")
+    if padding < 0:
+        raise ValueError("padding must not be negative")
+    if allow_expand_ratio < 1.0:
+        raise ValueError("allow_expand_ratio must be at least 1.0")
+
+    anchor = ScreenRegion(
+        x=zone_region.x + ocr_region.x,
+        y=zone_region.y + ocr_region.y,
+        width=ocr_region.width,
+        height=ocr_region.height,
+    )
+    bounds = _inline_bounds(zone_region, screen_bounds)
+    region = _clamp_region(anchor, bounds)
+
+    for font_size in range(max_font_size, min_font_size - 1, -1):
+        if _inline_text_fits(text, region.width, region.height, font_size, padding):
+            return InlineTextLayout(region=region, font_size=font_size, overflow=False)
+
+    expanded_height = min(
+        bounds.height,
+        max(region.height, int(round(ocr_region.height * allow_expand_ratio))),
+    )
+    expanded = _clamp_region(
+        ScreenRegion(region.x, region.y, region.width, expanded_height),
+        bounds,
+    )
+    if _inline_text_fits(text, expanded.width, expanded.height, min_font_size, padding):
+        return InlineTextLayout(region=expanded, font_size=min_font_size, overflow=False)
+    return InlineTextLayout(region=expanded, font_size=min_font_size, overflow=True)
 
 
 def append_debug_overlay_item(
@@ -178,7 +279,7 @@ def stack_overlay_items(
                     width=region.width,
                     height=region.height,
                 )
-        stacked.append(OverlayItem(text=item.text, region=region))
+        stacked.append(_copy_overlay_item(item, region=region))
 
     if screen_bounds is None:
         return stacked
@@ -197,14 +298,68 @@ def stack_overlay_items(
                         width=item.region.width,
                         height=item.region.height,
                     ),
+                    zone_id=item.zone_id,
+                    style=item.style,
+                    font_size=item.font_size,
+                    padding=item.padding,
+                    overflow=item.overflow,
                 )
                 for item in stacked
             ]
 
     return [
-        OverlayItem(text=item.text, region=_clamp_region(item.region, screen_bounds))
+        _copy_overlay_item(item, region=_clamp_region(item.region, screen_bounds))
         for item in stacked
     ]
+
+
+def _inline_bounds(
+    zone_region: ScreenRegion,
+    screen_bounds: ScreenRegion | None,
+) -> ScreenRegion:
+    if screen_bounds is None:
+        return zone_region
+    try:
+        return zone_region.clip_to(screen_bounds)
+    except ValueError:
+        return screen_bounds
+
+
+def _inline_text_fits(
+    text: str,
+    width: int,
+    height: int,
+    font_size: int,
+    padding: int,
+) -> bool:
+    usable_width = max(1, width - (padding * 2))
+    estimated_char_width = max(1, round(font_size * 0.55))
+    max_chars_per_line = max(1, usable_width // estimated_char_width)
+    line_count = 0
+    for paragraph in text.splitlines() or [text]:
+        line_count += _wrapped_word_line_count(paragraph, max_chars_per_line)
+    return line_count * font_size <= height
+
+
+def _wrapped_word_line_count(text: str, max_chars_per_line: int) -> int:
+    words = text.split()
+    if not words:
+        return 1
+    line_count = 1
+    current_length = 0
+    for word in words:
+        word_length = len(word)
+        if current_length == 0:
+            current_length = word_length
+            continue
+        if current_length + 1 + word_length <= max_chars_per_line:
+            current_length += 1 + word_length
+            continue
+        line_count += max(1, (current_length + max_chars_per_line - 1) // max_chars_per_line)
+        current_length = word_length
+    if current_length > max_chars_per_line:
+        line_count += (current_length + max_chars_per_line - 1) // max_chars_per_line - 1
+    return line_count
 
 
 def _estimated_line_width(line: str) -> int:
@@ -223,3 +378,15 @@ def _clamp_region(region: ScreenRegion, bounds: ScreenRegion) -> ScreenRegion:
     x = min(max(region.x, bounds.x), bounds.right - width)
     y = min(max(region.y, bounds.y), bounds.bottom - height)
     return ScreenRegion(x=x, y=y, width=width, height=height)
+
+
+def _copy_overlay_item(item: OverlayItem, *, region: ScreenRegion) -> OverlayItem:
+    return OverlayItem(
+        text=item.text,
+        region=region,
+        zone_id=item.zone_id,
+        style=item.style,
+        font_size=item.font_size,
+        padding=item.padding,
+        overflow=item.overflow,
+    )
