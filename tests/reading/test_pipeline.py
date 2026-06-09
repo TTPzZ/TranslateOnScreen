@@ -16,6 +16,7 @@ from screen_translator.domain.models import (
     TranslationZoneMode,
 )
 from screen_translator.overlay.layout import OverlayItem
+from screen_translator.ocr.registry import OcrProviderRegistry
 from screen_translator.reading.pipeline import ReadingModePipeline
 
 
@@ -59,6 +60,23 @@ class FakeOcr:
         return self.results.pop(0)
 
 
+class NamedOcr(FakeOcr):
+    def __init__(self, name: str, results: list[list[OcrTextBlock]]) -> None:
+        super().__init__(results)
+        self.name = name
+
+
+class ObservingOcr(FakeOcr):
+    def __init__(self, results: list[list[OcrTextBlock]], observer: object) -> None:
+        super().__init__(results)
+        self.observer = observer
+
+    def extract_text(self, captured: CapturedImage) -> list[OcrTextBlock]:
+        if callable(self.observer):
+            self.observer(captured)
+        return super().extract_text(captured)
+
+
 class FakeCache:
     def __init__(self, results: list[TranslationResult | None]) -> None:
         self.results = results
@@ -83,13 +101,37 @@ class FakeTranslationClient:
         return self.results.pop(0)
 
 
+class ObservingTranslationClient(FakeTranslationClient):
+    def __init__(self, results: list[TranslationResult], observer: object) -> None:
+        super().__init__(results)
+        self.observer = observer
+
+    def translate(self, request: TranslationRequest) -> TranslationResult:
+        if callable(self.observer):
+            self.observer(request)
+        return super().translate(request)
+
+
 class FakeOverlay:
     def __init__(self) -> None:
         self.items: list[OverlayItem] = []
         self.clear_calls = 0
+        self.show_calls = 0
+        self.zone_updates: list[tuple[str, list[str]]] = []
+        self.zone_clears: list[str] = []
 
     def show_items(self, items: list[OverlayItem]) -> None:
+        self.show_calls += 1
         self.items = items
+
+    def replace_zone_items(self, zone_id: str, items: list[OverlayItem]) -> None:
+        self.zone_updates.append((zone_id, [item.text for item in items]))
+        self.items = [item for item in self.items if item.zone_id != zone_id]
+        self.items.extend(items)
+
+    def clear_zone_items(self, zone_id: str) -> None:
+        self.zone_clears.append(zone_id)
+        self.items = [item for item in self.items if item.zone_id != zone_id]
 
     def clear(self) -> None:
         self.clear_calls += 1
@@ -140,6 +182,7 @@ def test_reading_config_parses_environment(monkeypatch) -> None:
     monkeypatch.setenv("SCREEN_TRANSLATOR_READING_CHANGE_THRESHOLD", "0.12")
     monkeypatch.setenv("SCREEN_TRANSLATOR_READING_MISSING_TIMEOUT_MS", "1500")
     monkeypatch.setenv("SCREEN_TRANSLATOR_READING_MIN_CONFIDENCE", "0.65")
+    monkeypatch.setenv("SCREEN_TRANSLATOR_SHOW_TRANSLATING_PLACEHOLDER", "false")
     monkeypatch.setenv("SCREEN_TRANSLATOR_GAMING_OVERLAY_TTL_MS", "4321")
     monkeypatch.setenv("SCREEN_TRANSLATOR_GAMING_OCR_CACHE_TTL_MS", "9876")
     monkeypatch.setenv("SCREEN_TRANSLATOR_GAMING_DISMISS_HOTKEY", "Q")
@@ -148,6 +191,21 @@ def test_reading_config_parses_environment(monkeypatch) -> None:
     monkeypatch.setenv("OVERLAY_INLINE_MAX_FONT_SIZE", "24")
     monkeypatch.setenv("OVERLAY_INLINE_PADDING", "7")
     monkeypatch.setenv("OVERLAY_INLINE_ALLOW_EXPAND_RATIO", "1.25")
+    monkeypatch.setenv("OVERLAY_INLINE_MAX_LINES", "3")
+    monkeypatch.setenv("OVERLAY_INLINE_LONG_TEXT_FALLBACK", "floating_panel")
+    monkeypatch.setenv("SPEED_PROFILE", "fast")
+    monkeypatch.setenv("SCREEN_TRANSLATOR_FAST_OCR", "false")
+    monkeypatch.setenv("OCR_MAX_IMAGE_WIDTH", "640")
+    monkeypatch.setenv("OCR_MIN_CONFIDENCE", "0.7")
+    monkeypatch.setenv("OCR_MIN_BLOCK_WIDTH", "9")
+    monkeypatch.setenv("OCR_MIN_BLOCK_HEIGHT", "10")
+    monkeypatch.setenv("OCR_MAX_BLOCKS_GAMING", "4")
+    monkeypatch.setenv("SCREEN_TRANSLATOR_ZONE_MIN_OCR_INTERVAL_MS", "600")
+    monkeypatch.setenv("SCREEN_TRANSLATOR_TRANSLATION_DEBOUNCE_MS", "450")
+    monkeypatch.setenv("OCR_HISTORY_CACHE_SIZE", "128")
+    monkeypatch.setenv("OCR_HISTORY_CACHE_TTL_MS", "123456")
+    monkeypatch.setenv("OCR_STABILITY_FRAMES", "3")
+    monkeypatch.setenv("SCREEN_TRANSLATOR_GAMING_WARM_CACHE", "false")
 
     config = AppConfig()
 
@@ -155,6 +213,7 @@ def test_reading_config_parses_environment(monkeypatch) -> None:
     assert config.reading_change_threshold == 0.12
     assert config.reading_missing_timeout_ms == 1500
     assert config.reading_min_confidence == 0.65
+    assert config.show_translating_placeholder is False
     assert config.gaming_overlay_ttl_ms == 4321
     assert config.gaming_ocr_cache_ttl_ms == 9876
     assert config.gaming_dismiss_hotkey == "Q"
@@ -163,6 +222,21 @@ def test_reading_config_parses_environment(monkeypatch) -> None:
     assert config.overlay_inline_max_font_size == 24
     assert config.overlay_inline_padding == 7
     assert config.overlay_inline_allow_expand_ratio == 1.25
+    assert config.overlay_inline_max_lines == 3
+    assert config.overlay_inline_long_text_fallback == "floating_panel"
+    assert config.speed_profile == "fast"
+    assert config.fast_ocr is False
+    assert config.ocr_max_image_width == 640
+    assert config.ocr_min_confidence == 0.7
+    assert config.ocr_min_block_width == 9
+    assert config.ocr_min_block_height == 10
+    assert config.ocr_max_blocks_gaming == 4
+    assert config.zone_min_ocr_interval_ms == 600
+    assert config.translation_debounce_ms == 450
+    assert config.ocr_history_cache_size == 128
+    assert config.ocr_history_cache_ttl_ms == 123456
+    assert config.ocr_stability_frames == 3
+    assert config.gaming_warm_cache is False
 
 
 def test_gaming_dismiss_hotkey_config_defaults_to_escape(monkeypatch) -> None:
@@ -297,7 +371,7 @@ def test_reading_pipeline_ocr_and_translates_only_changed_zones() -> None:
     capture = FakeZoneCapture(
         {
             zone_a.region.as_tuple(): [[100, 100], [100, 100]],
-            zone_b.region.as_tuple(): [[100, 100], [200, 100]],
+            zone_b.region.as_tuple(): [[101, 100], [200, 100]],
         }
     )
     ocr = FakeOcr([[block_a], [block_b1], [block_b2]])
@@ -337,6 +411,366 @@ def test_reading_pipeline_ocr_and_translates_only_changed_zones() -> None:
     assert second.translation_count == 1
 
 
+def test_reading_pipeline_emits_cached_zone_before_slow_zone_finishes() -> None:
+    zone_a = TranslationZone(
+        id="zone-a",
+        name="A",
+        region=ScreenRegion(10, 20, 200, 100),
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    zone_b = TranslationZone(
+        id="zone-b",
+        name="B",
+        region=ScreenRegion(300, 20, 200, 100),
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    updates: list[tuple[str | None, list[str]]] = []
+
+    def observe_provider_call(_request: TranslationRequest) -> None:
+        assert updates == [("zone-a", ["A cached"]), ("zone-b", ["..."])]
+
+    pipeline = ReadingModePipeline(
+        selector=FakeSelector(None),
+        capture=FakeZoneCapture(
+            {
+                zone_a.region.as_tuple(): [[100, 100]],
+                zone_b.region.as_tuple(): [[200, 200]],
+            }
+        ),
+        ocr=FakeOcr(
+            [
+                [OcrTextBlock("A text", 0.95, ScreenRegion(5, 5, 80, 20))],
+                [OcrTextBlock("B text", 0.95, ScreenRegion(5, 5, 80, 20))],
+            ]
+        ),
+        cache=FakeCache([TranslationResult("A cached", "en", "vi", "google", cached=True), None]),
+        translation_client=ObservingTranslationClient(
+            [TranslationResult("B translated", "en", "vi", "google")],
+            observe_provider_call,
+        ),
+        overlay=FakeOverlay(),
+        config=normal_config(),
+    )
+    pipeline.set_zones((zone_a, zone_b))
+
+    result = pipeline.process_next_frame(
+        progress_callback=lambda zone_result: updates.append(
+            (zone_result.zone_id, [item.text for item in zone_result.items])
+        )
+    )
+
+    assert updates == [
+        ("zone-a", ["A cached"]),
+        ("zone-b", ["..."]),
+        ("zone-b", ["B translated"]),
+    ]
+    assert result.items == []
+    assert result.had_text is True
+
+
+def test_reading_pipeline_emits_reused_zone_before_new_zone_ocr_starts() -> None:
+    zone_a = TranslationZone(
+        id="zone-a",
+        name="A",
+        region=ScreenRegion(10, 20, 200, 100),
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    zone_b = TranslationZone(
+        id="zone-b",
+        name="B",
+        region=ScreenRegion(300, 20, 200, 100),
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    updates: list[tuple[str | None, list[str]]] = []
+    warmed = False
+
+    def observe_ocr(captured: CapturedImage) -> None:
+        if warmed and captured.region == zone_b.region:
+            assert updates == [("zone-a", ["A cached"])]
+
+    pipeline = ReadingModePipeline(
+        selector=FakeSelector(None),
+        capture=FakeZoneCapture(
+            {
+                zone_a.region.as_tuple(): [[100, 100], [100, 100]],
+                zone_b.region.as_tuple(): [[200, 200]],
+            }
+        ),
+        ocr=ObservingOcr(
+            [
+                [OcrTextBlock("A text", 0.95, ScreenRegion(5, 5, 80, 20))],
+                [OcrTextBlock("B text", 0.95, ScreenRegion(5, 5, 80, 20))],
+            ],
+            observe_ocr,
+        ),
+        cache=FakeCache(
+            [
+                TranslationResult("A cached", "en", "vi", "google", cached=True),
+                None,
+            ]
+        ),
+        translation_client=FakeTranslationClient(
+            [TranslationResult("B translated", "en", "vi", "google")]
+        ),
+        overlay=FakeOverlay(),
+        config=normal_config(reading_change_threshold=0.01),
+    )
+    pipeline.set_zones((zone_a,))
+    pipeline.apply_result(pipeline.process_next_frame(progress_callback=pipeline.apply_result))
+    warmed = True
+    pipeline.set_zones((zone_a, zone_b))
+
+    result = pipeline.process_next_frame(
+        progress_callback=lambda zone_result: updates.append(
+            (zone_result.zone_id, [item.text for item in zone_result.items])
+        )
+    )
+
+    assert updates == [
+        ("zone-a", ["A cached"]),
+        ("zone-b", ["..."]),
+        ("zone-b", ["B translated"]),
+    ]
+    assert result.had_text is True
+
+
+def test_reading_pipeline_emits_multiple_reused_zones_immediately() -> None:
+    zone_a = TranslationZone(
+        id="zone-a",
+        name="A",
+        region=ScreenRegion(10, 20, 200, 100),
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    zone_b = TranslationZone(
+        id="zone-b",
+        name="B",
+        region=ScreenRegion(300, 20, 200, 100),
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    updates: list[tuple[str | None, list[str]]] = []
+    pipeline = ReadingModePipeline(
+        selector=FakeSelector(None),
+        capture=FakeZoneCapture(
+            {
+                zone_a.region.as_tuple(): [[10, 10], [10, 10]],
+                zone_b.region.as_tuple(): [[20, 20], [20, 20]],
+            }
+        ),
+        ocr=FakeOcr(
+            [
+                [OcrTextBlock("A text", 0.95, ScreenRegion(5, 5, 80, 20))],
+                [OcrTextBlock("B text", 0.95, ScreenRegion(5, 5, 80, 20))],
+            ]
+        ),
+        cache=FakeCache(
+            [
+                TranslationResult("A cached", "en", "vi", "google", cached=True),
+                TranslationResult("B cached", "en", "vi", "google", cached=True),
+            ]
+        ),
+        translation_client=FakeTranslationClient([]),
+        overlay=FakeOverlay(),
+        config=normal_config(reading_change_threshold=0.01),
+    )
+    pipeline.set_zones((zone_a, zone_b))
+    pipeline.apply_result(pipeline.process_next_frame(progress_callback=pipeline.apply_result))
+
+    result = pipeline.process_next_frame(
+        progress_callback=lambda zone_result: updates.append(
+            (zone_result.zone_id, [item.text for item in zone_result.items])
+        )
+    )
+
+    assert updates == [("zone-a", ["A cached"]), ("zone-b", ["B cached"])]
+    assert result.ocr_count == 0
+    assert result.had_text is True
+
+
+def test_reading_pipeline_incremental_zone_update_does_not_clear_other_zone() -> None:
+    zone_a = TranslationZone(
+        id="zone-a",
+        name="A",
+        region=ScreenRegion(10, 20, 200, 100),
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    zone_b = TranslationZone(
+        id="zone-b",
+        name="B",
+        region=ScreenRegion(300, 20, 200, 100),
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    overlay = FakeOverlay()
+    pipeline = ReadingModePipeline(
+        selector=FakeSelector(None),
+        capture=FakeZoneCapture(
+            {
+                zone_a.region.as_tuple(): [[10, 10], [250, 250]],
+                zone_b.region.as_tuple(): [[20, 20], [20, 20]],
+            }
+        ),
+        ocr=FakeOcr(
+            [
+                [OcrTextBlock("A first", 0.95, ScreenRegion(5, 5, 80, 20))],
+                [OcrTextBlock("B first", 0.95, ScreenRegion(5, 5, 80, 20))],
+                [OcrTextBlock("A second", 0.95, ScreenRegion(5, 5, 80, 20))],
+            ]
+        ),
+        cache=FakeCache(
+            [
+                TranslationResult("A vi 1", "en", "vi", "google", cached=True),
+                TranslationResult("B vi 1", "en", "vi", "google", cached=True),
+                TranslationResult("A vi 2", "en", "vi", "google", cached=True),
+            ]
+        ),
+        translation_client=FakeTranslationClient([]),
+        overlay=overlay,
+        config=normal_config(reading_change_threshold=0.01, zone_min_ocr_interval_ms=0),
+    )
+    pipeline.set_zones((zone_a, zone_b))
+
+    first = pipeline.process_next_frame(progress_callback=pipeline.apply_result)
+    pipeline.apply_result(first)
+    second = pipeline.process_next_frame(progress_callback=pipeline.apply_result)
+    pipeline.apply_result(second)
+
+    assert overlay.clear_calls == 0
+    assert overlay.show_calls == 0
+    assert overlay.zone_updates == [
+        ("zone-a", ["A vi 1"]),
+        ("zone-b", ["B vi 1"]),
+        ("zone-a", ["A vi 2"]),
+    ]
+    assert [(item.zone_id, item.text) for item in overlay.items] == [
+        ("zone-b", "B vi 1"),
+        ("zone-a", "A vi 2"),
+    ]
+
+
+def test_reading_pipeline_skips_identical_cached_first_pass_render() -> None:
+    zone = TranslationZone(
+        id="zone-a",
+        name="A",
+        region=ScreenRegion(10, 20, 200, 100),
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    overlay = FakeOverlay()
+    pipeline = ReadingModePipeline(
+        selector=FakeSelector(None),
+        capture=FakeZoneCapture({zone.region.as_tuple(): [[10, 10], [10, 10]]}),
+        ocr=FakeOcr([[OcrTextBlock("A first", 0.95, ScreenRegion(5, 5, 80, 20))]]),
+        cache=FakeCache([TranslationResult("A vi 1", "en", "vi", "google", cached=True)]),
+        translation_client=FakeTranslationClient([]),
+        overlay=overlay,
+        config=normal_config(reading_change_threshold=0.01),
+    )
+    pipeline.set_zones((zone,))
+
+    first = pipeline.process_next_frame(progress_callback=pipeline.apply_result)
+    pipeline.apply_result(first)
+    second = pipeline.process_next_frame(progress_callback=pipeline.apply_result)
+    pipeline.apply_result(second)
+
+    assert overlay.zone_updates == [("zone-a", ["A vi 1"])]
+    assert [item.text for item in overlay.items] == ["A vi 1"]
+
+
+def test_reading_pipeline_stability_filter_rejects_one_frame_minor_ocr_change(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    zone = TranslationZone(
+        id="zone-a",
+        name="A",
+        region=ScreenRegion(10, 20, 200, 100),
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    overlay = FakeOverlay()
+    pipeline = ReadingModePipeline(
+        selector=FakeSelector(None),
+        capture=FakeZoneCapture(
+            {
+                zone.region.as_tuple(): [[100, 0], [200, 0], [250, 0]],
+            }
+        ),
+        ocr=FakeOcr(
+            [
+                [OcrTextBlock("Hello", 0.80, ScreenRegion(5, 5, 80, 20))],
+                [OcrTextBlock("Hell0", 0.81, ScreenRegion(5, 5, 80, 20))],
+                [OcrTextBlock("Hell0", 0.81, ScreenRegion(5, 5, 80, 20))],
+            ]
+        ),
+        cache=FakeCache([None, None]),
+        translation_client=FakeTranslationClient(
+            [
+                TranslationResult("Xin chao", "en", "vi", "google"),
+                TranslationResult("Xin chao typo", "en", "vi", "google"),
+            ]
+        ),
+        overlay=overlay,
+        config=normal_config(ocr_history_cache_size=0, ocr_stability_frames=2),
+    )
+    pipeline.set_zones((zone,))
+
+    with caplog.at_level(logging.INFO, logger="screen_translator.reading.pipeline"):
+        pipeline.apply_result(pipeline.process_next_frame())
+        pipeline.apply_result(pipeline.process_next_frame())
+        assert [item.text for item in overlay.items] == ["Xin chao"]
+        pipeline.apply_result(pipeline.process_next_frame())
+
+    assert [item.text for item in overlay.items] == ["Xin chao typo"]
+    assert "ocr_stability_rejected" in caplog.text
+    assert "ocr_stability_accepted" in caplog.text
+
+
+def test_reading_pipeline_uses_per_zone_ocr_engine_and_preprocess() -> None:
+    np = pytest.importorskip("numpy")
+    zone = TranslationZone(
+        id="zone-a",
+        name="A",
+        region=ScreenRegion(10, 20, 200, 100),
+        ocr_engine="windows",
+        ocr_preprocess="invert",
+        speed_profile="fast",
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    paddle = NamedOcr("paddle", [[OcrTextBlock("Paddle", 0.95, ScreenRegion(5, 5, 80, 20))]])
+    windows = NamedOcr("windows", [[OcrTextBlock("Windows", 0.95, ScreenRegion(5, 5, 80, 20))]])
+    pipeline = ReadingModePipeline(
+        selector=FakeSelector(None),
+        capture=FakeZoneCapture(
+            {zone.region.as_tuple(): [np.array([[0, 255]], dtype=np.uint8)]}
+        ),
+        ocr=paddle,
+        ocr_registry=OcrProviderRegistry(
+            paddle_provider=paddle,
+            windows_provider_factory=lambda: windows,
+        ),
+        cache=FakeCache([None]),
+        translation_client=FakeTranslationClient(
+            [TranslationResult("Nhanh", "en", "vi", "google")]
+        ),
+        overlay=FakeOverlay(),
+        config=normal_config(ocr_history_cache_size=0),
+    )
+    pipeline.set_zones((zone,))
+
+    pipeline.apply_result(pipeline.process_next_frame())
+
+    assert paddle.calls == 0
+    assert windows.calls == 1
+    assert windows.payloads[0].tolist() == [[255, 0]]
+
+
 def test_reading_pipeline_skips_ocr_and_translation_when_all_zones_are_unchanged() -> None:
     zone = TranslationZone(
         id="zone-1",
@@ -368,6 +802,222 @@ def test_reading_pipeline_skips_ocr_and_translation_when_all_zones_are_unchanged
     assert ocr.calls == 1
     assert len(cache.get_calls) == 1
     assert translation_client.calls == []
+    assert [item.text for item in overlay.items] == ["Xin chao"]
+
+
+def test_reading_pipeline_logs_ocr_skip_reason_for_unchanged_zone(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    zone = TranslationZone(
+        id="zone-1",
+        name="Dialog",
+        region=ScreenRegion(10, 20, 200, 100),
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    block = OcrTextBlock("Hello", 0.95, ScreenRegion(5, 5, 80, 20))
+    pipeline = ReadingModePipeline(
+        selector=FakeSelector(None),
+        capture=FakeZoneCapture({zone.region.as_tuple(): [[100, 100], [100, 100]]}),
+        ocr=FakeOcr([[block]]),
+        cache=FakeCache([TranslationResult("Xin chao", "en", "vi", "google", cached=True)]),
+        translation_client=FakeTranslationClient([]),
+        overlay=FakeOverlay(),
+        config=normal_config(reading_change_threshold=0.01, debug_mode=True),
+    )
+    pipeline.set_zones((zone,))
+
+    with caplog.at_level(logging.DEBUG, logger="screen_translator.reading.pipeline"):
+        pipeline.apply_result(pipeline.process_next_frame())
+        pipeline.apply_result(pipeline.process_next_frame())
+
+    assert "ocr_skipped_reason=image_unchanged" in caplog.text
+    assert "capture_without_overlays=true" in caplog.text
+
+
+def test_reading_pipeline_cooldown_prevents_repeated_zone_ocr() -> None:
+    now = 0.0
+
+    def clock() -> float:
+        return now
+
+    zone = TranslationZone(
+        id="zone-1",
+        name="Dialog",
+        region=ScreenRegion(10, 20, 200, 100),
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    first_block = OcrTextBlock("Hello", 0.95, ScreenRegion(5, 5, 80, 20))
+    second_block = OcrTextBlock("Changed", 0.95, ScreenRegion(5, 5, 80, 20))
+    pipeline = ReadingModePipeline(
+        selector=FakeSelector(None),
+        capture=FakeZoneCapture({zone.region.as_tuple(): [[0, 100], [0, 110]]}),
+        ocr=FakeOcr([[first_block], [second_block]]),
+        cache=FakeCache(
+            [
+                TranslationResult("Xin chao", "en", "vi", "google", cached=True),
+                TranslationResult("Da doi", "en", "vi", "google", cached=True),
+            ]
+        ),
+        translation_client=FakeTranslationClient([]),
+        overlay=FakeOverlay(),
+        config=normal_config(
+            reading_interval_ms=100,
+            reading_change_threshold=0.01,
+            zone_min_ocr_interval_ms=500,
+        ),
+        clock=clock,
+    )
+    pipeline.set_zones((zone,))
+
+    pipeline.apply_result(pipeline.process_next_frame())
+    now = 0.1
+    result = pipeline.process_next_frame()
+    pipeline.apply_result(result)
+
+    assert pipeline._zone_states["zone-1"].last_ocr_blocks == [first_block]
+    assert result.ocr_count == 0
+    assert pipeline._zone_states["zone-1"].last_translations == ["Xin chao"]
+
+
+def test_reading_pipeline_significant_zone_change_bypasses_ocr_cooldown() -> None:
+    now = 0.0
+
+    def clock() -> float:
+        return now
+
+    zone = TranslationZone(
+        id="zone-1",
+        name="Dialog",
+        region=ScreenRegion(10, 20, 200, 100),
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    capture = FakeZoneCapture({zone.region.as_tuple(): [[0, 100], [255, 255]]})
+    ocr = FakeOcr(
+        [
+            [OcrTextBlock("Hello", 0.95, ScreenRegion(5, 5, 80, 20))],
+            [OcrTextBlock("Changed", 0.95, ScreenRegion(5, 5, 80, 20))],
+        ]
+    )
+    pipeline = ReadingModePipeline(
+        selector=FakeSelector(None),
+        capture=capture,
+        ocr=ocr,
+        cache=FakeCache(
+            [
+                TranslationResult("Xin chao", "en", "vi", "google", cached=True),
+                TranslationResult("Da doi", "en", "vi", "google", cached=True),
+            ]
+        ),
+        translation_client=FakeTranslationClient([]),
+        overlay=FakeOverlay(),
+        config=normal_config(
+            reading_interval_ms=100,
+            reading_change_threshold=0.01,
+            zone_min_ocr_interval_ms=500,
+        ),
+        clock=clock,
+    )
+    pipeline.set_zones((zone,))
+
+    pipeline.apply_result(pipeline.process_next_frame())
+    now = 0.1
+    pipeline.apply_result(pipeline.process_next_frame())
+
+    assert ocr.calls == 2
+
+
+def test_reading_pipeline_skips_translation_when_zone_ocr_text_is_unchanged() -> None:
+    zone = TranslationZone(
+        id="zone-1",
+        name="Dialog",
+        region=ScreenRegion(10, 20, 200, 100),
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    cache = FakeCache([None])
+    translation_client = FakeTranslationClient(
+        [TranslationResult("Xin chao", "en", "vi", "google")]
+    )
+    overlay = FakeOverlay()
+    pipeline = ReadingModePipeline(
+        selector=FakeSelector(None),
+        capture=FakeZoneCapture({zone.region.as_tuple(): [[0, 100], [255, 255]]}),
+        ocr=FakeOcr(
+            [
+                [OcrTextBlock("Hello", 0.95, ScreenRegion(5, 5, 80, 20))],
+                [OcrTextBlock("Hello", 0.95, ScreenRegion(15, 15, 80, 20))],
+            ]
+        ),
+        cache=cache,
+        translation_client=translation_client,
+        overlay=overlay,
+        config=normal_config(
+            reading_change_threshold=0.01,
+            zone_min_ocr_interval_ms=0,
+        ),
+    )
+    pipeline.set_zones((zone,))
+
+    pipeline.apply_result(pipeline.process_next_frame())
+    pipeline.apply_result(pipeline.process_next_frame())
+
+    assert [request.text for request in cache.get_calls] == ["Hello"]
+    assert [request.text for request in translation_client.calls] == ["Hello"]
+    assert [item.text for item in overlay.items] == ["Xin chao"]
+    assert overlay.items[0].region.x == 25
+
+
+def test_reading_pipeline_debounces_rapid_zone_translation_updates() -> None:
+    now = 0.0
+
+    def clock() -> float:
+        return now
+
+    zone = TranslationZone(
+        id="zone-1",
+        name="Dialog",
+        region=ScreenRegion(10, 20, 200, 100),
+        created_at="2026-06-04T12:00:00+00:00",
+        updated_at="2026-06-04T12:00:00+00:00",
+    )
+    cache = FakeCache([None])
+    translation_client = FakeTranslationClient(
+        [TranslationResult("Xin chao", "en", "vi", "google")]
+    )
+    overlay = FakeOverlay()
+    pipeline = ReadingModePipeline(
+        selector=FakeSelector(None),
+        capture=FakeZoneCapture({zone.region.as_tuple(): [[0, 100], [255, 255]]}),
+        ocr=FakeOcr(
+            [
+                [OcrTextBlock("Hello", 0.95, ScreenRegion(5, 5, 80, 20))],
+                [OcrTextBlock("New text", 0.95, ScreenRegion(5, 5, 90, 20))],
+            ]
+        ),
+        cache=cache,
+        translation_client=translation_client,
+        overlay=overlay,
+        config=normal_config(
+            reading_interval_ms=100,
+            reading_change_threshold=0.01,
+            zone_min_ocr_interval_ms=0,
+            translation_debounce_ms=300,
+        ),
+        clock=clock,
+    )
+    pipeline.set_zones((zone,))
+
+    pipeline.apply_result(pipeline.process_next_frame())
+    now = 0.1
+    result = pipeline.process_next_frame()
+    pipeline.apply_result(result)
+
+    assert [request.text for request in cache.get_calls] == ["Hello"]
+    assert [request.text for request in translation_client.calls] == ["Hello"]
+    assert result.translation_count == 0
     assert [item.text for item in overlay.items] == ["Xin chao"]
 
 
@@ -408,7 +1058,7 @@ def test_reading_pipeline_hides_overlays_once_for_multi_zone_capture_batch(
         ),
         translation_client=FakeTranslationClient([]),
         overlay=overlay,
-        config=normal_config(reading_change_threshold=0.01),
+        config=normal_config(reading_change_threshold=0.01, ocr_history_cache_size=0),
         capture_guard=OverlayCaptureGuard([overlay]),
     )
     pipeline.set_zones((zone_a, zone_b))
@@ -740,13 +1390,13 @@ def test_reading_pipeline_logs_latest_and_average_timings_in_debug_mode(
             pipeline.tick()
 
     assert "reading pipeline timings capture_ms=1.0" in caplog.text
-    assert "ocr_ms=1.0" in caplog.text
+    assert "ocr_ms=3.0" in caplog.text
     assert "cache_lookup_ms=1.0" in caplog.text
     assert "translation_request_ms=0.0" in caplog.text
     assert "overlay_render_ms=2.0" in caplog.text
     assert "reading pipeline timing averages window=10" in caplog.text
     assert "capture_ms_avg=1.0" in caplog.text
-    assert "ocr_ms_avg=1.0" in caplog.text
+    assert "ocr_ms_avg=3.0" in caplog.text
     assert "cache_lookup_ms_avg=1.0" in caplog.text
     assert "translation_request_ms_avg=0.0" in caplog.text
     assert "overlay_render_ms_avg=2.0" in caplog.text

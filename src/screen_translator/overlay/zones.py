@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from screen_translator.domain.models import (
+    OcrEngineMode,
+    OcrPreprocessMode,
     OverlayStyleMode,
     ScreenRegion,
     TranslationZone,
@@ -27,6 +29,9 @@ class ZoneOverlayCallbacks:
     on_move: Callable[[str], bool]
     on_style_change: Callable[[str, str], bool]
     on_mode_change: Callable[[str, str], bool]
+    on_ocr_engine_change: Callable[[str, str], bool]
+    on_ocr_preprocess_change: Callable[[str, str], bool]
+    on_speed_profile_change: Callable[[str, str], bool]
 
 
 class ZoneOverlayWindow:
@@ -46,13 +51,24 @@ class ZoneOverlayWindow:
         on_move: Callable[[str], bool] | None = None,
         on_style_change: Callable[[str, str], bool] | None = None,
         on_mode_change: Callable[[str, str], bool] | None = None,
+        on_ocr_engine_change: Callable[[str, str], bool] | None = None,
+        on_ocr_preprocess_change: Callable[[str, str], bool] | None = None,
+        on_speed_profile_change: Callable[[str, str], bool] | None = None,
     ) -> None:
         if callbacks is not None:
             self._callbacks = callbacks
             return
         if any(
             callback is None
-            for callback in (on_delete, on_move, on_style_change, on_mode_change)
+            for callback in (
+                on_delete,
+                on_move,
+                on_style_change,
+                on_mode_change,
+                on_ocr_engine_change,
+                on_ocr_preprocess_change,
+                on_speed_profile_change,
+            )
         ):
             raise ValueError("all zone overlay callbacks are required")
         self._callbacks = ZoneOverlayCallbacks(
@@ -60,6 +76,9 @@ class ZoneOverlayWindow:
             on_move=on_move,
             on_style_change=on_style_change,
             on_mode_change=on_mode_change,
+            on_ocr_engine_change=on_ocr_engine_change,
+            on_ocr_preprocess_change=on_ocr_preprocess_change,
+            on_speed_profile_change=on_speed_profile_change,
         )
 
     def show_zones(
@@ -210,7 +229,7 @@ def _zone_widget_class(QtCore: Any, QtWidgets: Any) -> type[Any]:
                     toolbar_region = ScreenRegion(
                         zone.region.x,
                         zone.region.y,
-                        min(zone.region.width, 260),
+                        min(zone.region.width, 520),
                         24,
                     )
                     toolbar.setGeometry(*toolbar_region.as_tuple())
@@ -299,6 +318,33 @@ def _create_zone_toolbar(
         mode_combo.setStyleSheet(_toolbar_control_stylesheet())
     layout.addWidget(mode_combo)
 
+    engine_combo = QtWidgets.QComboBox(toolbar)
+    engine_combo.addItems([engine.value for engine in OcrEngineMode])
+    engine_combo.setCurrentText(zone.ocr_engine.value)
+    if hasattr(engine_combo, "setFixedHeight"):
+        engine_combo.setFixedHeight(20)
+    if hasattr(engine_combo, "setStyleSheet"):
+        engine_combo.setStyleSheet(_toolbar_control_stylesheet())
+    layout.addWidget(engine_combo)
+
+    preprocess_combo = QtWidgets.QComboBox(toolbar)
+    preprocess_combo.addItems([mode.value for mode in OcrPreprocessMode])
+    preprocess_combo.setCurrentText(zone.ocr_preprocess.value)
+    if hasattr(preprocess_combo, "setFixedHeight"):
+        preprocess_combo.setFixedHeight(20)
+    if hasattr(preprocess_combo, "setStyleSheet"):
+        preprocess_combo.setStyleSheet(_toolbar_control_stylesheet())
+    layout.addWidget(preprocess_combo)
+
+    speed_combo = QtWidgets.QComboBox(toolbar)
+    speed_combo.addItems(["fast", "balanced", "accurate"])
+    speed_combo.setCurrentText(zone.speed_profile)
+    if hasattr(speed_combo, "setFixedHeight"):
+        speed_combo.setFixedHeight(20)
+    if hasattr(speed_combo, "setStyleSheet"):
+        speed_combo.setStyleSheet(_toolbar_control_stylesheet())
+    layout.addWidget(speed_combo)
+
     if callbacks is not None:
         delete_button.clicked.connect(lambda _checked=False, zone_id=zone.id: callbacks.on_delete(zone_id))
         move_button.clicked.connect(lambda _checked=False, zone_id=zone.id: callbacks.on_move(zone_id))
@@ -307,6 +353,15 @@ def _create_zone_toolbar(
         )
         mode_combo.currentTextChanged.connect(
             lambda mode, zone_id=zone.id: callbacks.on_mode_change(zone_id, mode)
+        )
+        engine_combo.currentTextChanged.connect(
+            lambda engine, zone_id=zone.id: callbacks.on_ocr_engine_change(zone_id, engine)
+        )
+        preprocess_combo.currentTextChanged.connect(
+            lambda preprocess, zone_id=zone.id: callbacks.on_ocr_preprocess_change(zone_id, preprocess)
+        )
+        speed_combo.currentTextChanged.connect(
+            lambda profile, zone_id=zone.id: callbacks.on_speed_profile_change(zone_id, profile)
         )
     return toolbar
 

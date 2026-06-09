@@ -7,6 +7,7 @@ from screen_translator.domain.models import TranslationZone
 from screen_translator.ui.settings import (
     PROVIDER_OPTIONS,
     SOURCE_LANGUAGE_OPTIONS,
+    SPEED_PROFILE_OPTIONS,
     ControlPanelSettings,
     validate_hotkey_text,
 )
@@ -63,6 +64,15 @@ class ControlController(Protocol):
 
     def set_zone_mode(self, zone_id: str, mode: str) -> bool:
         """Set zone mode."""
+
+    def set_zone_ocr_engine(self, zone_id: str, engine: str) -> bool:
+        """Set zone OCR engine."""
+
+    def set_zone_ocr_preprocess(self, zone_id: str, preprocess: str) -> bool:
+        """Set zone OCR preprocessing mode."""
+
+    def set_zone_speed_profile(self, zone_id: str, profile: str) -> bool:
+        """Set zone speed profile."""
 
     def edit_zone_position(self, zone_id: str) -> bool:
         """Replace a zone region using the region selector."""
@@ -173,6 +183,15 @@ class ControlPanelPresenter:
     def set_zone_mode(self, zone_id: str, mode: str) -> bool:
         return self._controller.set_zone_mode(zone_id, mode)
 
+    def set_zone_ocr_engine(self, zone_id: str, engine: str) -> bool:
+        return self._controller.set_zone_ocr_engine(zone_id, engine)
+
+    def set_zone_ocr_preprocess(self, zone_id: str, preprocess: str) -> bool:
+        return self._controller.set_zone_ocr_preprocess(zone_id, preprocess)
+
+    def set_zone_speed_profile(self, zone_id: str, profile: str) -> bool:
+        return self._controller.set_zone_speed_profile(zone_id, profile)
+
     def edit_zone_position(self, zone_id: str) -> bool:
         return self._controller.edit_zone_position(zone_id)
 
@@ -254,13 +273,23 @@ class ControlPanelPresenter:
             "General": [],
         }
         for line in self._controller.diagnostic_lines():
-            if line.startswith(("Translation Count:", "Cache Hits:", "Cache Misses:")):
+            if line.startswith(
+                (
+                    "Translation Count:",
+                    "Translation Skipped:",
+                    "Translation Requests:",
+                    "Inflight Translation Reuse:",
+                    "Translation History Cache",
+                    "Cache Hits:",
+                    "Cache Misses:",
+                )
+            ):
                 groups["Translation"].append(line)
-            elif line.startswith("OCR Count:"):
+            elif line.startswith(("OCR Count:", "OCR Skipped:", "OCR History Cache")):
                 groups["OCR"].append(line)
             elif line.startswith(("Gaming OCR Cache", "Reading Auto-Stopped By Gaming:")):
                 groups["Gaming"].append(line)
-            elif "Latency" in line:
+            elif "Latency" in line or line.startswith("Slowest Zone:"):
                 groups["Latency"].append(line)
             elif line.startswith(("Reading Zones:", "Gaming Zones:", "Both Zones:")):
                 groups["Zones"].append(line)
@@ -385,15 +414,23 @@ def _build_window(QtWidgets: Any, presenter: ControlPanelPresenter, *, QtCore: A
         ["Name", "X", "Y", "Width", "Height", "Visible", "Style", "Mode"]
     )
     add_zone_button = QtWidgets.QPushButton("Add Zone")
+    start_reading_button = QtWidgets.QPushButton("Start Reading Mode")
+    stop_reading_button = QtWidgets.QPushButton("Stop Reading Mode")
     toggle_zones_button = QtWidgets.QPushButton("Show Zones / Hide Zones")
     edit_zones_checkbox = QtWidgets.QCheckBox("Edit Zones")
     delete_all_zones_button = QtWidgets.QPushButton("Delete All Zones")
+    if hasattr(start_reading_button, "setToolTip"):
+        start_reading_button.setToolTip("Start Reading Mode using reading/both zones, or selected region if no zones exist.")
+    if hasattr(stop_reading_button, "setToolTip"):
+        stop_reading_button.setToolTip("Stop Reading Mode and clear Reading overlays.")
     if hasattr(toggle_zones_button, "setToolTip"):
         toggle_zones_button.setToolTip("Show or hide zone borders only.")
     if hasattr(edit_zones_checkbox, "setToolTip"):
         edit_zones_checkbox.setToolTip("Enable zone toolbar controls and interactivity.")
     zones_layout.addWidget(zones_table)
     zones_layout.addWidget(add_zone_button)
+    zones_layout.addWidget(start_reading_button)
+    zones_layout.addWidget(stop_reading_button)
     zones_layout.addWidget(toggle_zones_button)
     zones_layout.addWidget(edit_zones_checkbox)
     zones_layout.addWidget(delete_all_zones_button)
@@ -500,6 +537,12 @@ def _build_window(QtWidgets: Any, presenter: ControlPanelPresenter, *, QtCore: A
 
     advanced_tab = _new_tab(QtWidgets)
     advanced_layout = QtWidgets.QVBoxLayout(advanced_tab)
+    speed_profile = _combo_box(
+        QtWidgets,
+        label="Speed Profile",
+        values=SPEED_PROFILE_OPTIONS,
+        current=settings.speed_profile,
+    )
     reading_interval = _spinbox(
         QtWidgets,
         label="Reading Interval ms",
@@ -535,6 +578,7 @@ def _build_window(QtWidgets: Any, presenter: ControlPanelPresenter, *, QtCore: A
         overlay_ttl.setToolTip("0 keeps the Gaming overlay visible until Esc or Clear Gaming Overlay.")
     debug_mode = QtWidgets.QCheckBox("Debug Logs")
     debug_mode.setChecked(settings.debug_mode)
+    _add_labeled_widget(QtWidgets, advanced_layout, "Speed Profile", speed_profile)
     _add_labeled_widget(QtWidgets, advanced_layout, "Reading Interval ms", reading_interval)
     _add_labeled_widget(QtWidgets, advanced_layout, "Change Threshold", change_threshold)
     _add_labeled_widget(QtWidgets, advanced_layout, "Missing Timeout ms", missing_timeout)
@@ -594,6 +638,7 @@ def _build_window(QtWidgets: Any, presenter: ControlPanelPresenter, *, QtCore: A
             source_language=source_combo.currentText(),
             target_language=target_combo.currentText(),
             translation_server_url=server_url.text(),
+            speed_profile=speed_profile.currentText(),
             reading_interval_ms=reading_interval.value(),
             reading_change_threshold=change_threshold.value(),
             reading_missing_timeout_ms=missing_timeout.value(),
@@ -613,6 +658,16 @@ def _build_window(QtWidgets: Any, presenter: ControlPanelPresenter, *, QtCore: A
             overlay_inline_max_font_size=current_settings.overlay_inline_max_font_size,
             overlay_inline_padding=current_settings.overlay_inline_padding,
             overlay_inline_allow_expand_ratio=current_settings.overlay_inline_allow_expand_ratio,
+            overlay_inline_max_lines=current_settings.overlay_inline_max_lines,
+            overlay_inline_long_text_fallback=current_settings.overlay_inline_long_text_fallback,
+            fast_ocr=current_settings.fast_ocr,
+            ocr_max_image_width=current_settings.ocr_max_image_width,
+            ocr_min_confidence=current_settings.ocr_min_confidence,
+            ocr_min_block_width=current_settings.ocr_min_block_width,
+            ocr_min_block_height=current_settings.ocr_min_block_height,
+            ocr_max_blocks_gaming=current_settings.ocr_max_blocks_gaming,
+            zone_min_ocr_interval_ms=current_settings.zone_min_ocr_interval_ms,
+            translation_debounce_ms=current_settings.translation_debounce_ms,
         )
 
     def run_and_refresh(action: Any) -> Any:
@@ -640,6 +695,8 @@ def _build_window(QtWidgets: Any, presenter: ControlPanelPresenter, *, QtCore: A
     stop_server_button.clicked.connect(lambda _checked=False: run_and_refresh(presenter.stop_local_server))
     server_status_button.clicked.connect(lambda _checked=False: refresh_status())
     add_zone_button.clicked.connect(lambda _checked=False: run_zone_action(presenter.add_zone))
+    start_reading_button.clicked.connect(lambda _checked=False: run_and_refresh(presenter.start_reading_mode))
+    stop_reading_button.clicked.connect(lambda _checked=False: run_and_refresh(presenter.stop_reading_mode))
     toggle_zones_button.clicked.connect(lambda _checked=False: run_zone_action(presenter.toggle_zone_borders))
     edit_zones_checkbox.toggled.connect(
         lambda checked=False: run_zone_action(lambda: presenter.set_edit_zones_enabled(checked))
@@ -658,6 +715,8 @@ def _build_window(QtWidgets: Any, presenter: ControlPanelPresenter, *, QtCore: A
             "Save Settings": save_button,
             "Reset Default Settings": reset_button,
             "Add Zone": add_zone_button,
+            "Start Reading Mode": start_reading_button,
+            "Stop Reading Mode": stop_reading_button,
             "Show Zones / Hide Zones": toggle_zones_button,
             "Delete All Zones": delete_all_zones_button,
         },
@@ -665,6 +724,7 @@ def _build_window(QtWidgets: Any, presenter: ControlPanelPresenter, *, QtCore: A
             "Provider": provider_combo,
             "Source Language": source_combo,
             "Target Language": target_combo,
+            "Speed Profile": speed_profile,
         },
         fields={
             "Server URL": server_url,

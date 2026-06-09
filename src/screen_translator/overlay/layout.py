@@ -26,6 +26,8 @@ class OverlayItem:
     font_size: int | None = None
     padding: int | None = None
     overflow: bool = False
+    line_count: int | None = None
+    line_height: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +36,9 @@ class InlineTextLayout:
 
     region: ScreenRegion
     font_size: int
+    text: str
+    line_count: int
+    line_height: int
     overflow: bool = False
 
 
@@ -60,11 +65,15 @@ def build_overlay_items(
     inline_max_font_size: int = 22,
     inline_padding: int = 6,
     inline_allow_expand_ratio: float = 1.5,
+    inline_max_lines: int = 4,
+    inline_long_text_fallback: str = "none",
 ) -> list[OverlayItem]:
     if len(ocr_blocks) != len(translations):
         raise ValueError("translations count must match OCR blocks")
     if overlay_style not in {"floating_panel", "inline_replace"}:
         raise ValueError(f"Unsupported overlay style: {overlay_style}")
+    if inline_long_text_fallback not in {"none", "floating_panel"}:
+        raise ValueError(f"Unsupported inline long text fallback: {inline_long_text_fallback}")
 
     items: list[OverlayItem] = []
     for block, translation in zip(ocr_blocks, translations, strict=True):
@@ -84,16 +93,36 @@ def build_overlay_items(
                 max_font_size=inline_max_font_size,
                 padding=inline_padding,
                 allow_expand_ratio=inline_allow_expand_ratio,
+                max_lines=inline_max_lines,
             )
+            if inline_layout.overflow and inline_long_text_fallback == "floating_panel":
+                region = _translation_panel_region(
+                    text=text,
+                    ocr_region=block.region,
+                    selected_region=selected_region,
+                    screen_bounds=screen_bounds,
+                    max_panel_width=max_panel_width,
+                )
+                items.append(
+                    OverlayItem(
+                        text=text,
+                        region=region,
+                        zone_id=zone_id,
+                        style="floating_panel",
+                    )
+                )
+                continue
             items.append(
                 OverlayItem(
-                    text=text,
+                    text=inline_layout.text,
                     region=inline_layout.region,
                     zone_id=zone_id,
                     style="inline_replace",
                     font_size=inline_layout.font_size,
                     padding=inline_padding,
                     overflow=inline_layout.overflow,
+                    line_count=inline_layout.line_count,
+                    line_height=inline_layout.line_height,
                 )
             )
             continue
@@ -133,6 +162,7 @@ def fit_inline_text(
     max_font_size: int,
     padding: int,
     allow_expand_ratio: float,
+    max_lines: int = 4,
 ) -> InlineTextLayout:
     if min_font_size <= 0:
         raise ValueError("min_font_size must be positive")
@@ -142,6 +172,8 @@ def fit_inline_text(
         raise ValueError("padding must not be negative")
     if allow_expand_ratio < 1.0:
         raise ValueError("allow_expand_ratio must be at least 1.0")
+    if max_lines <= 0:
+        raise ValueError("max_lines must be positive")
 
     anchor = ScreenRegion(
         x=zone_region.x + ocr_region.x,
@@ -151,22 +183,95 @@ def fit_inline_text(
     )
     bounds = _inline_bounds(zone_region, screen_bounds)
     region = _clamp_region(anchor, bounds)
+    max_layout_height = min(
+        bounds.height,
+        max(
+            region.height,
+            int(round(ocr_region.height * allow_expand_ratio)),
+            _inline_required_height(max_lines, _inline_line_height(min_font_size), padding),
+        ),
+    )
 
     for font_size in range(max_font_size, min_font_size - 1, -1):
-        if _inline_text_fits(text, region.width, region.height, font_size, padding):
-            return InlineTextLayout(region=region, font_size=font_size, overflow=False)
+        line_height = _inline_line_height(font_size)
+        max_chars_per_line = _inline_max_chars_per_line(region.width, font_size, padding)
+        lines = _wrap_inline_text(text, max_chars_per_line)
+        line_count = len(lines)
+        needed_height = _inline_required_height(line_count, line_height, padding)
+        target_height = max(region.height, needed_height)
+        if line_count <= max_lines and target_height <= max_layout_height:
+            fitted_region = _clamp_region(
+                ScreenRegion(region.x, region.y, region.width, target_height),
+                bounds,
+            )
+            return InlineTextLayout(
+                region=fitted_region,
+                font_size=font_size,
+                text="\n".join(lines),
+                line_count=line_count,
+                line_height=line_height,
+                overflow=False,
+            )
 
     expanded_height = min(
         bounds.height,
-        max(region.height, int(round(ocr_region.height * allow_expand_ratio))),
+        max(
+            region.height,
+            int(round(ocr_region.height * allow_expand_ratio)),
+            _inline_required_height(max_lines, _inline_line_height(min_font_size), padding),
+        ),
     )
     expanded = _clamp_region(
         ScreenRegion(region.x, region.y, region.width, expanded_height),
         bounds,
     )
-    if _inline_text_fits(text, expanded.width, expanded.height, min_font_size, padding):
-        return InlineTextLayout(region=expanded, font_size=min_font_size, overflow=False)
-    return InlineTextLayout(region=expanded, font_size=min_font_size, overflow=True)
+    line_height = _inline_line_height(min_font_size)
+    max_chars_per_line = _inline_max_chars_per_line(expanded.width, min_font_size, padding)
+    lines = _wrap_inline_text(text, max_chars_per_line)
+    max_lines_by_height = max(
+        1,
+        (expanded.height - (padding * 2)) // line_height,
+    )
+    visible_line_count = max(1, min(max_lines, max_lines_by_height))
+    if len(lines) <= visible_line_count:
+        needed_height = _inline_required_height(len(lines), line_height, padding)
+        fitted_region = _clamp_region(
+            ScreenRegion(
+                expanded.x,
+                expanded.y,
+                expanded.width,
+                min(bounds.height, max(expanded.height, needed_height)),
+            ),
+            bounds,
+        )
+        return InlineTextLayout(
+            region=fitted_region,
+            font_size=min_font_size,
+            text="\n".join(lines),
+            line_count=len(lines),
+            line_height=line_height,
+            overflow=False,
+        )
+
+    truncated_lines = _truncate_inline_lines(lines, visible_line_count, max_chars_per_line)
+    needed_height = _inline_required_height(len(truncated_lines), line_height, padding)
+    fitted_region = _clamp_region(
+        ScreenRegion(
+            expanded.x,
+            expanded.y,
+            expanded.width,
+            min(bounds.height, max(expanded.height, needed_height)),
+        ),
+        bounds,
+    )
+    return InlineTextLayout(
+        region=fitted_region,
+        font_size=min_font_size,
+        text="\n".join(truncated_lines),
+        line_count=len(truncated_lines),
+        line_height=line_height,
+        overflow=True,
+    )
 
 
 def append_debug_overlay_item(
@@ -303,6 +408,8 @@ def stack_overlay_items(
                     font_size=item.font_size,
                     padding=item.padding,
                     overflow=item.overflow,
+                    line_count=item.line_count,
+                    line_height=item.line_height,
                 )
                 for item in stacked
             ]
@@ -325,20 +432,71 @@ def _inline_bounds(
         return screen_bounds
 
 
-def _inline_text_fits(
-    text: str,
-    width: int,
-    height: int,
-    font_size: int,
-    padding: int,
-) -> bool:
+def _inline_line_height(font_size: int) -> int:
+    return max(font_size + 2, int(round(font_size * 1.25)))
+
+
+def _inline_required_height(line_count: int, line_height: int, padding: int) -> int:
+    return max(1, line_count) * line_height + (padding * 2)
+
+
+def _inline_max_chars_per_line(width: int, font_size: int, padding: int) -> int:
     usable_width = max(1, width - (padding * 2))
     estimated_char_width = max(1, round(font_size * 0.55))
-    max_chars_per_line = max(1, usable_width // estimated_char_width)
-    line_count = 0
+    return max(1, usable_width // estimated_char_width)
+
+
+def _wrap_inline_text(text: str, max_chars_per_line: int) -> list[str]:
+    lines: list[str] = []
     for paragraph in text.splitlines() or [text]:
-        line_count += _wrapped_word_line_count(paragraph, max_chars_per_line)
-    return line_count * font_size <= height
+        words = paragraph.split()
+        if not words:
+            lines.append("")
+            continue
+        current = ""
+        for word in words:
+            chunks = _split_long_word(word, max_chars_per_line)
+            for chunk in chunks:
+                if not current:
+                    current = chunk
+                    continue
+                if len(current) + 1 + len(chunk) <= max_chars_per_line:
+                    current = f"{current} {chunk}"
+                    continue
+                lines.append(current)
+                current = chunk
+        if current:
+            lines.append(current)
+    return lines or [""]
+
+
+def _split_long_word(word: str, max_chars_per_line: int) -> list[str]:
+    if len(word) <= max_chars_per_line:
+        return [word]
+    return [
+        word[index : index + max_chars_per_line]
+        for index in range(0, len(word), max_chars_per_line)
+    ]
+
+
+def _truncate_inline_lines(
+    lines: list[str],
+    max_lines: int,
+    max_chars_per_line: int,
+) -> list[str]:
+    visible = list(lines[:max(1, max_lines)])
+    last = visible[-1] if visible else ""
+    visible[-1] = _append_ellipsis(last, max_chars_per_line)
+    return visible
+
+
+def _append_ellipsis(text: str, max_chars_per_line: int) -> str:
+    if max_chars_per_line <= 3:
+        return "..."[:max_chars_per_line]
+    if text.endswith("...") and len(text) <= max_chars_per_line:
+        return text
+    base = text[: max_chars_per_line - 3].rstrip()
+    return f"{base}..."
 
 
 def _wrapped_word_line_count(text: str, max_chars_per_line: int) -> int:
@@ -389,4 +547,6 @@ def _copy_overlay_item(item: OverlayItem, *, region: ScreenRegion) -> OverlayIte
         font_size=item.font_size,
         padding=item.padding,
         overflow=item.overflow,
+        line_count=item.line_count,
+        line_height=item.line_height,
     )

@@ -16,6 +16,19 @@ For lightweight unit-test-only validation, the desktop and Google extras are not
 scripts/setup_dev.ps1 -SkipDesktop
 ```
 
+Optional Windows OCR validation:
+
+```powershell
+.\.venv311\Scripts\python.exe -m pip install ".[windows-ocr]"
+.\.venv311\Scripts\python.exe -m screen_translator.ocr.windows_provider --diagnose
+```
+
+Expected when the optional dependency is installed and importable:
+`status=available`. If the diagnostic reports
+`windows_ocr_binding_unavailable:ModuleNotFoundError`, install
+`winrt-Windows.Media.Ocr>=3.2.1` in the active environment or use the existing
+PaddleOCR fallback.
+
 ## Local Setup
 
 Run commands from the repository root:
@@ -112,6 +125,11 @@ $env:SCREEN_TRANSLATOR_READING_MIN_CONFIDENCE = "0.5"
 ```
 
 With `$env:SCREEN_TRANSLATOR_DEBUG = "true"`, Reading Mode logs the latest timing values and rolling averages over the last 10 and last 100 processed frames. Reading Mode and Gaming Mode temporarily hide app-owned overlays before OCR capture and restore them immediately after capture; logs include `capture_without_overlays=true`, `overlays hidden before capture`, and `overlays restored after capture`. Gaming Mode logs hotkey press time, overlay shown time, total response time, translation unit count, translation request count, `gaming_ocr_cache_hit` or `gaming_ocr_cache_miss`, and `image_fingerprint`. Logs and the debug overlay warn when total pipeline time, OCR time, or translation time exceed 2000 ms.
+
+For multi-zone Reading Mode, cached or quickly processed zones should update
+their overlays immediately. A slower uncached zone may briefly show `...` when
+`SCREEN_TRANSLATOR_SHOW_TRANSLATING_PLACEHOLDER=true`, then replace that
+placeholder with the translated text without clearing other zones.
 
 ## Running the Server
 

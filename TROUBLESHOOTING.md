@@ -29,6 +29,42 @@ scripts/setup_dev.ps1 -PythonVersion 3.11
 
 The first startup may download or initialize models. Keep the app open until logs show `PaddleOCR warm-up completed`, then retry with a smaller selected region. Reading Mode and Gaming Mode reuse the same shared PaddleOCR engine after warm-up.
 
+## Windows OCR unavailable
+
+Run:
+
+```powershell
+.\.venv311\Scripts\python.exe -m screen_translator.ocr.windows_provider --diagnose
+```
+
+If diagnostics show:
+
+```text
+reason=windows_ocr_binding_unavailable:ModuleNotFoundError
+```
+
+the active Python environment is missing the PyWinRT package that provides
+`winrt.windows.media.ocr`. Install it with:
+
+```powershell
+.\.venv311\Scripts\python.exe -m pip install ".[windows-ocr]"
+```
+
+Direct package install:
+
+```powershell
+.\.venv311\Scripts\python.exe -m pip install "winrt-Windows.Media.Ocr>=3.2.1"
+```
+
+Windows OCR remains optional. If the package is installed but runtime diagnostics
+or logs still show fallback, keep using PaddleOCR and set zone speed profile to
+`fast`. The next fallback options, in order of least architecture disruption,
+are:
+
+- PaddleOCR fast/mobile configuration: keep the current provider and tune image size, block limits, and skipping.
+- Tesseract: stable local OCR, but requires installing native Tesseract plus a Python wrapper.
+- EasyOCR: easier Python packaging than native Tesseract, but usually heavier than Windows OCR for real-time use.
+
 ## Hotkey not working
 
 - Check that another app has not registered `Ctrl+Shift+T`.

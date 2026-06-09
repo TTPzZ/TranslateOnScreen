@@ -77,6 +77,21 @@ def test_sqlite_cache_persists_results_between_instances(tmp_path: Path) -> None
     )
 
 
+def test_sqlite_cache_reuses_normalized_text_history_after_other_text(tmp_path: Path) -> None:
+    db_path = tmp_path / "translations.db"
+    cache = SQLiteTranslationCache(db_path)
+    request_a = TranslationRequest("Hello\n  World", "en", "vi", "google")
+    request_b = TranslationRequest("Different text", "en", "vi", "google")
+    cache.set(request_a, TranslationResult("Xin chao the gioi", "en", "vi", "google"))
+    cache.set(request_b, TranslationResult("Van ban khac", "en", "vi", "google"))
+
+    reloaded = SQLiteTranslationCache(db_path)
+
+    assert reloaded.get(TranslationRequest("Hello World", "en", "vi", "google")) == (
+        TranslationResult("Xin chao the gioi", "en", "vi", "google", cached=True)
+    )
+
+
 def test_sqlite_cache_keys_include_provider_and_languages(tmp_path: Path) -> None:
     cache = SQLiteTranslationCache(tmp_path / "translations.db")
     request = TranslationRequest(

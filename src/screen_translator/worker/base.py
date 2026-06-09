@@ -4,9 +4,11 @@ from collections.abc import Callable
 from typing import Any, Protocol
 
 
-WorkerTask = Callable[[], Any]
+WorkerProgress = Callable[[Any], None]
+WorkerTask = Callable[[WorkerProgress | None], Any]
 WorkerSuccess = Callable[[int, Any], None]
 WorkerError = Callable[[int, Exception], None]
+WorkerProgressCallback = Callable[[int, Any], None]
 
 
 class Worker(Protocol):
@@ -18,6 +20,7 @@ class Worker(Protocol):
         task: WorkerTask,
         on_success: WorkerSuccess,
         on_error: WorkerError,
+        on_progress: WorkerProgressCallback | None = None,
     ) -> bool:
         """Start one job and return False when already busy."""
 

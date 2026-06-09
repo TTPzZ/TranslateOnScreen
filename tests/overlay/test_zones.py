@@ -99,6 +99,9 @@ def test_zone_overlay_edit_mode_keeps_toolbar_clickable(monkeypatch: pytest.Monk
         on_move=lambda zone_id: actions.append(("move", zone_id, None)) or True,
         on_style_change=lambda zone_id, style: actions.append(("style", zone_id, style)) or True,
         on_mode_change=lambda zone_id, mode: actions.append(("mode", zone_id, mode)) or True,
+        on_ocr_engine_change=lambda zone_id, engine: actions.append(("ocr_engine", zone_id, engine)) or True,
+        on_ocr_preprocess_change=lambda zone_id, preprocess: actions.append(("ocr_preprocess", zone_id, preprocess)) or True,
+        on_speed_profile_change=lambda zone_id, profile: actions.append(("speed_profile", zone_id, profile)) or True,
     )
 
     overlay.show_zones(
@@ -122,8 +125,17 @@ def test_zone_overlay_edit_mode_keeps_toolbar_clickable(monkeypatch: pytest.Monk
     assert [combo.items for combo in combos] == [
         ["floating_panel", "inline_replace"],
         ["reading", "gaming", "both", "disabled"],
+        ["auto", "paddle", "windows"],
+        ["none", "grayscale", "threshold", "invert", "contrast"],
+        ["fast", "balanced", "accurate"],
     ]
-    assert [combo.current_text for combo in combos] == ["floating_panel", "reading"]
+    assert [combo.current_text for combo in combos] == [
+        "floating_panel",
+        "reading",
+        "auto",
+        "none",
+        "balanced",
+    ]
     assert all("QComboBox QAbstractItemView" in combo.stylesheet for combo in combos)
     assert all("background-color: #ffffff" in combo.stylesheet for combo in combos)
     assert all("color: #111111" in combo.stylesheet for combo in combos)
@@ -133,12 +145,18 @@ def test_zone_overlay_edit_mode_keeps_toolbar_clickable(monkeypatch: pytest.Monk
     buttons[1].click()
     combos[0].setCurrentText("inline_replace")
     combos[1].setCurrentText("both")
+    combos[2].setCurrentText("windows")
+    combos[3].setCurrentText("threshold")
+    combos[4].setCurrentText("fast")
 
     assert actions == [
         ("delete", "zone-1", None),
         ("move", "zone-1", None),
         ("style", "zone-1", "inline_replace"),
         ("mode", "zone-1", "both"),
+        ("ocr_engine", "zone-1", "windows"),
+        ("ocr_preprocess", "zone-1", "threshold"),
+        ("speed_profile", "zone-1", "fast"),
     ]
 
 

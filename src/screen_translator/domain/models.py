@@ -58,6 +58,20 @@ class TranslationZoneMode(StrEnum):
     DISABLED = "disabled"
 
 
+class OcrEngineMode(StrEnum):
+    AUTO = "auto"
+    PADDLE = "paddle"
+    WINDOWS = "windows"
+
+
+class OcrPreprocessMode(StrEnum):
+    NONE = "none"
+    GRAYSCALE = "grayscale"
+    THRESHOLD = "threshold"
+    INVERT = "invert"
+    CONTRAST = "contrast"
+
+
 @dataclass(frozen=True, slots=True)
 class TranslationZone:
     """Persistent user-selected screen translation area."""
@@ -70,6 +84,9 @@ class TranslationZone:
     translation_visible: bool = True
     mode: TranslationZoneMode | str | None = TranslationZoneMode.READING
     overlay_style: OverlayStyleMode | str = OverlayStyleMode.FLOATING_PANEL
+    ocr_engine: OcrEngineMode | str | None = OcrEngineMode.AUTO
+    ocr_preprocess: OcrPreprocessMode | str | None = OcrPreprocessMode.NONE
+    speed_profile: str | None = "balanced"
     created_at: str = ""
     updated_at: str = ""
     last_ocr_result: Any | None = field(default=None, compare=False, repr=False)
@@ -86,6 +103,13 @@ class TranslationZone:
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "mode", _normalize_zone_mode(self.mode))
         object.__setattr__(self, "overlay_style", OverlayStyleMode(self.overlay_style))
+        object.__setattr__(self, "ocr_engine", _normalize_ocr_engine(self.ocr_engine))
+        object.__setattr__(
+            self,
+            "ocr_preprocess",
+            _normalize_ocr_preprocess(self.ocr_preprocess),
+        )
+        object.__setattr__(self, "speed_profile", _normalize_speed_profile(self.speed_profile))
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +204,37 @@ def _normalize_zone_mode(value: TranslationZoneMode | str | None) -> Translation
         return TranslationZoneMode(str(value).strip().lower())
     except ValueError:
         return TranslationZoneMode.READING
+
+
+def _normalize_ocr_engine(value: OcrEngineMode | str | None) -> OcrEngineMode:
+    if isinstance(value, OcrEngineMode):
+        return value
+    if value is None:
+        return OcrEngineMode.AUTO
+    try:
+        return OcrEngineMode(str(value).strip().lower())
+    except ValueError:
+        return OcrEngineMode.AUTO
+
+
+def _normalize_ocr_preprocess(value: OcrPreprocessMode | str | None) -> OcrPreprocessMode:
+    if isinstance(value, OcrPreprocessMode):
+        return value
+    if value is None:
+        return OcrPreprocessMode.NONE
+    try:
+        return OcrPreprocessMode(str(value).strip().lower())
+    except ValueError:
+        return OcrPreprocessMode.NONE
+
+
+def _normalize_speed_profile(value: str | None) -> str:
+    if value is None:
+        return "balanced"
+    normalized = str(value).strip().lower()
+    if normalized not in {"fast", "balanced", "accurate"}:
+        return "balanced"
+    return normalized
 
 
 _MOJIBAKE_MARKERS = ("Ã", "Â", "â€", "â€™", "áº", "á»", "Æ")

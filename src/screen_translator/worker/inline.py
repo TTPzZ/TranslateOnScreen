@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from screen_translator.worker.base import WorkerError, WorkerSuccess, WorkerTask
+from screen_translator.worker.base import (
+    WorkerError,
+    WorkerProgressCallback,
+    WorkerSuccess,
+    WorkerTask,
+)
 
 
 class InlineWorker:
@@ -16,13 +21,19 @@ class InlineWorker:
         task: WorkerTask,
         on_success: WorkerSuccess,
         on_error: WorkerError,
+        on_progress: WorkerProgressCallback | None = None,
     ) -> bool:
         if self._busy:
             return False
         self._busy = True
         self._cancelled = False
         try:
-            result = task()
+            progress = (
+                None
+                if on_progress is None
+                else lambda payload: on_progress(job_id, payload)
+            )
+            result = task(progress)
         except Exception as exc:
             if not self._cancelled:
                 on_error(job_id, exc)

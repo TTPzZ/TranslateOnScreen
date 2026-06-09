@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Callable
 from typing import Protocol
 
 from screen_translator.domain.models import CapturedImage, ScreenRegion
@@ -20,6 +21,14 @@ class ReadingJobResult:
     translation_count: int = 0
     cache_hits: int = 0
     cache_misses: int = 0
+    translation_history_cache_hits: int = 0
+    translation_history_cache_misses: int = 0
+    translation_request_count: int = 0
+    translation_reused_inflight_count: int = 0
+    ocr_skipped_count: int = 0
+    translation_skipped_count: int = 0
+    zone_id: str | None = None
+    rendered_incrementally: bool = False
 
 
 class ReadingJobPipeline(Protocol):
@@ -35,7 +44,10 @@ class ReadingJobPipeline(Protocol):
     def process_captured_frame(self, captured: CapturedImage) -> ReadingJobResult:
         """Run non-UI work for one captured frame."""
 
-    def process_next_frame(self) -> ReadingJobResult:
+    def process_next_frame(
+        self,
+        progress_callback: Callable[[ReadingJobResult], None] | None = None,
+    ) -> ReadingJobResult:
         """Capture and process the next Reading Mode frame or zone batch."""
 
     def apply_result(self, result: ReadingJobResult) -> None:
@@ -125,7 +137,9 @@ class AsyncReadingModeRunner:
         job_id = self._job_id
         accepted = self._worker.submit(
             job_id,
-            lambda: self._pipeline.process_next_frame(),
+            lambda progress_callback=None: self._pipeline.process_next_frame(
+                progress_callback=progress_callback
+            ),
             lambda finished_job_id, result: self._handle_success(
                 generation,
                 finished_job_id,
@@ -135,6 +149,11 @@ class AsyncReadingModeRunner:
                 generation,
                 finished_job_id,
                 error,
+            ),
+            lambda finished_job_id, result: self._handle_progress(
+                generation,
+                finished_job_id,
+                result,
             ),
         )
         if not accepted:
@@ -151,6 +170,22 @@ class AsyncReadingModeRunner:
     ) -> None:
         del job_id
         self._busy = False
+        if not self._running or generation != self._generation:
+            self._metrics.record_stale_result()
+            return
+        try:
+            self._pipeline.apply_result(result)
+        except Exception as exc:
+            self._metrics.record_error(exc)
+            self._pipeline.handle_error(exc)
+
+    def _handle_progress(
+        self,
+        generation: int,
+        job_id: int,
+        result: ReadingJobResult,
+    ) -> None:
+        del job_id
         if not self._running or generation != self._generation:
             self._metrics.record_stale_result()
             return

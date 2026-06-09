@@ -21,6 +21,31 @@ scripts/setup_dev.ps1 -SkipDesktop
 
 `scripts/setup_dev.ps1` installs the project into `.venv`. If you already activated `.venv311`, the control-panel runner will use it. For full OCR/UI smoke tests, use the default full install because PyQt6 and PaddleOCR are required.
 
+Optional Windows OCR uses the PyWinRT package that provides
+`winrt.windows.media.ocr`. Install it in the same environment used by the
+desktop app:
+
+```powershell
+.\.venv311\Scripts\python.exe -m pip install ".[windows-ocr]"
+```
+
+Direct package install:
+
+```powershell
+.\.venv311\Scripts\python.exe -m pip install "winrt-Windows.Media.Ocr>=3.2.1"
+```
+
+Run the diagnostic command:
+
+```powershell
+.\.venv311\Scripts\python.exe -m screen_translator.ocr.windows_provider --diagnose
+```
+
+Expected when installed: `status=available`. If it reports
+`windows_ocr_binding_unavailable:ModuleNotFoundError`, install
+`winrt-Windows.Media.Ocr` into the active virtual environment or keep using
+PaddleOCR fallback.
+
 ## 3. Start FastAPI Server
 
 Create `.env` from `.env.example` and set credential paths in your own environment. Do not commit `.env`.

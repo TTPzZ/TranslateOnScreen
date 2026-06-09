@@ -3,6 +3,8 @@ from __future__ import annotations
 import pytest
 
 from screen_translator.domain.models import (
+    OcrEngineMode,
+    OcrPreprocessMode,
     OverlayStyleMode,
     ScreenRegion,
     TranslationZone,
@@ -44,23 +46,32 @@ def test_translation_zone_defaults_to_reading_floating_visible_and_enabled() -> 
     assert zone.enabled is True
     assert zone.visible is True
     assert zone.translation_visible is True
+    assert zone.ocr_engine == OcrEngineMode.AUTO
+    assert zone.ocr_preprocess == OcrPreprocessMode.NONE
+    assert zone.speed_profile == "balanced"
     assert zone.last_ocr_result is None
     assert zone.last_translation_result is None
 
 
-def test_translation_zone_accepts_string_modes_and_styles() -> None:
+def test_translation_zone_accepts_string_modes_styles_and_ocr_settings() -> None:
     zone = TranslationZone(
         id="zone-1",
         name="Dialog",
         region=ScreenRegion(10, 20, 300, 120),
         mode="both",
         overlay_style="inline_replace",
+        ocr_engine="windows",
+        ocr_preprocess="threshold",
+        speed_profile="fast",
         created_at="2026-06-04T12:00:00+00:00",
         updated_at="2026-06-04T12:00:00+00:00",
     )
 
     assert zone.mode == TranslationZoneMode.BOTH
     assert zone.overlay_style == OverlayStyleMode.INLINE_REPLACE
+    assert zone.ocr_engine == OcrEngineMode.WINDOWS
+    assert zone.ocr_preprocess == OcrPreprocessMode.THRESHOLD
+    assert zone.speed_profile == "fast"
 
 
 def test_translation_zone_unknown_or_missing_mode_defaults_to_reading() -> None:

@@ -7,6 +7,8 @@ import pytest
 from screen_translator.config import AppConfig
 from screen_translator.domain.models import (
     OverlayStyleMode,
+    OcrEngineMode,
+    OcrPreprocessMode,
     OcrTextBlock,
     ScreenRegion,
     TranslationResult,
@@ -49,6 +51,20 @@ def test_settings_defaults_are_safe_for_daily_control_panel_use() -> None:
     assert settings.overlay_inline_max_font_size == 22
     assert settings.overlay_inline_padding == 6
     assert settings.overlay_inline_allow_expand_ratio == 1.5
+    assert settings.overlay_inline_max_lines == 4
+    assert settings.overlay_inline_long_text_fallback == "none"
+    assert settings.speed_profile == "balanced"
+    assert settings.fast_ocr is True
+    assert settings.ocr_max_image_width == 800
+    assert settings.ocr_min_confidence == 0.60
+    assert settings.ocr_min_block_width == 8
+    assert settings.ocr_min_block_height == 8
+    assert settings.ocr_max_blocks_gaming == 5
+    assert settings.zone_min_ocr_interval_ms == 500
+    assert settings.translation_debounce_ms == 300
+    assert settings.ocr_history_cache_size == 256
+    assert settings.ocr_history_cache_ttl_ms == 300000
+    assert settings.ocr_stability_frames == 2
 
 
 def test_settings_load_save_and_reset_round_trip(tmp_path) -> None:
@@ -122,6 +138,9 @@ def test_settings_zone_round_trip_excludes_runtime_results(tmp_path) -> None:
         region=ScreenRegion(10, 20, 300, 120),
         mode=TranslationZoneMode.BOTH,
         overlay_style=OverlayStyleMode.INLINE_REPLACE,
+        ocr_engine=OcrEngineMode.WINDOWS,
+        ocr_preprocess=OcrPreprocessMode.THRESHOLD,
+        speed_profile="fast",
         created_at="2026-06-04T12:00:00+00:00",
         updated_at="2026-06-04T12:10:00+00:00",
         last_ocr_result=[OcrTextBlock("Hello", 0.95, ScreenRegion(2, 3, 40, 12))],
@@ -138,9 +157,12 @@ def test_settings_zone_round_trip_excludes_runtime_results(tmp_path) -> None:
             "enabled": True,
             "id": "zone-1",
             "mode": "both",
+            "ocr_engine": "windows",
+            "ocr_preprocess": "threshold",
             "name": "Dialog",
             "overlay_style": "inline_replace",
             "region": {"height": 120, "width": 300, "x": 10, "y": 20},
+            "speed_profile": "fast",
             "translation_visible": True,
             "updated_at": "2026-06-04T12:10:00+00:00",
             "visible": True,
@@ -154,6 +176,9 @@ def test_settings_zone_round_trip_excludes_runtime_results(tmp_path) -> None:
         region=ScreenRegion(10, 20, 300, 120),
         mode=TranslationZoneMode.BOTH,
         overlay_style=OverlayStyleMode.INLINE_REPLACE,
+        ocr_engine=OcrEngineMode.WINDOWS,
+        ocr_preprocess=OcrPreprocessMode.THRESHOLD,
+        speed_profile="fast",
         created_at="2026-06-04T12:00:00+00:00",
         updated_at="2026-06-04T12:10:00+00:00",
     )
@@ -186,6 +211,20 @@ def test_settings_map_to_app_config_without_losing_cache_path(tmp_path) -> None:
         overlay_inline_max_font_size=24,
         overlay_inline_padding=7,
         overlay_inline_allow_expand_ratio=1.25,
+        overlay_inline_max_lines=3,
+        overlay_inline_long_text_fallback="floating_panel",
+        speed_profile="fast",
+        fast_ocr=False,
+        ocr_max_image_width=640,
+        ocr_min_confidence=0.7,
+        ocr_min_block_width=9,
+        ocr_min_block_height=10,
+        ocr_max_blocks_gaming=4,
+        zone_min_ocr_interval_ms=600,
+        translation_debounce_ms=450,
+        ocr_history_cache_size=128,
+        ocr_history_cache_ttl_ms=123456,
+        ocr_stability_frames=3,
         debug_mode=True,
         debug_overlay_enabled=True,
     )
@@ -209,6 +248,20 @@ def test_settings_map_to_app_config_without_losing_cache_path(tmp_path) -> None:
     assert config.overlay_inline_max_font_size == 24
     assert config.overlay_inline_padding == 7
     assert config.overlay_inline_allow_expand_ratio == 1.25
+    assert config.overlay_inline_max_lines == 3
+    assert config.overlay_inline_long_text_fallback == "floating_panel"
+    assert config.speed_profile == "fast"
+    assert config.fast_ocr is False
+    assert config.ocr_max_image_width == 640
+    assert config.ocr_min_confidence == 0.7
+    assert config.ocr_min_block_width == 9
+    assert config.ocr_min_block_height == 10
+    assert config.ocr_max_blocks_gaming == 4
+    assert config.zone_min_ocr_interval_ms == 600
+    assert config.translation_debounce_ms == 450
+    assert config.ocr_history_cache_size == 128
+    assert config.ocr_history_cache_ttl_ms == 123456
+    assert config.ocr_stability_frames == 3
     assert config.debug_mode is True
     assert config.debug_overlay_enabled is True
 
@@ -219,6 +272,20 @@ def test_settings_from_config_includes_inline_overlay_values() -> None:
         overlay_inline_max_font_size=24,
         overlay_inline_padding=7,
         overlay_inline_allow_expand_ratio=1.25,
+        overlay_inline_max_lines=3,
+        overlay_inline_long_text_fallback="floating_panel",
+        speed_profile="accurate",
+        fast_ocr=False,
+        ocr_max_image_width=1200,
+        ocr_min_confidence=0.45,
+        ocr_min_block_width=4,
+        ocr_min_block_height=4,
+        ocr_max_blocks_gaming=12,
+        zone_min_ocr_interval_ms=150,
+        translation_debounce_ms=100,
+        ocr_history_cache_size=64,
+        ocr_history_cache_ttl_ms=111111,
+        ocr_stability_frames=4,
     )
 
     settings = ControlPanelSettings.from_config(config)
@@ -227,6 +294,20 @@ def test_settings_from_config_includes_inline_overlay_values() -> None:
     assert settings.overlay_inline_max_font_size == 24
     assert settings.overlay_inline_padding == 7
     assert settings.overlay_inline_allow_expand_ratio == 1.25
+    assert settings.overlay_inline_max_lines == 3
+    assert settings.overlay_inline_long_text_fallback == "floating_panel"
+    assert settings.speed_profile == "accurate"
+    assert settings.fast_ocr is False
+    assert settings.ocr_max_image_width == 1200
+    assert settings.ocr_min_confidence == 0.45
+    assert settings.ocr_min_block_width == 4
+    assert settings.ocr_min_block_height == 4
+    assert settings.ocr_max_blocks_gaming == 12
+    assert settings.zone_min_ocr_interval_ms == 150
+    assert settings.translation_debounce_ms == 100
+    assert settings.ocr_history_cache_size == 64
+    assert settings.ocr_history_cache_ttl_ms == 111111
+    assert settings.ocr_stability_frames == 4
 
 
 def test_provider_dropdown_values_are_stable() -> None:

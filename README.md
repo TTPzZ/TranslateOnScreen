@@ -28,6 +28,7 @@ Reading Mode continuously watches a selected region for manga, PDF, websites, an
 - Select a screen region once.
 - Periodically capture and compare the region.
 - Skip OCR when the frame change is below `SCREEN_TRANSLATOR_READING_CHANGE_THRESHOLD`.
+- With saved Zones, update each completed zone overlay independently instead of waiting for every active zone to finish.
 - Merge nearby OCR blocks into readable lines or paragraphs.
 - Use local SQLite cache before requesting translations.
 - Keep overlay text visible while text remains present.
@@ -42,6 +43,29 @@ Use Python 3.11 or 3.12. Python 3.13+ is not supported for this project yet.
 ```powershell
 scripts/setup_dev.ps1
 ```
+
+Optional Windows OCR support uses the PyWinRT projection for the
+`winrt.windows.media.ocr` module. Install it on Windows with:
+
+```powershell
+.\.venv311\Scripts\python.exe -m pip install ".[windows-ocr]"
+```
+
+Or install the package directly:
+
+```powershell
+.\.venv311\Scripts\python.exe -m pip install "winrt-Windows.Media.Ocr>=3.2.1"
+```
+
+Diagnose Windows OCR availability with:
+
+```powershell
+.\.venv311\Scripts\python.exe -m screen_translator.ocr.windows_provider --diagnose
+```
+
+If this reports `windows_ocr_binding_unavailable:ModuleNotFoundError`, the
+`winrt-Windows.Media.Ocr` package is missing from the active Python
+environment. Windows OCR is optional; PaddleOCR remains the fallback.
 
 For unit tests in this workspace, the verified command is:
 
@@ -138,6 +162,9 @@ $env:SCREEN_TRANSLATOR_READING_CHANGE_THRESHOLD = "0.02"
 
 $env:SCREEN_TRANSLATOR_READING_MISSING_TIMEOUT_MS = "2000"
 $env:SCREEN_TRANSLATOR_READING_MIN_CONFIDENCE = "0.5"
+
+# Show "..." for a zone while an uncached translation request is in progress.
+$env:SCREEN_TRANSLATOR_SHOW_TRANSLATING_PLACEHOLDER = "true"
 ```
 
 Overlay settings:

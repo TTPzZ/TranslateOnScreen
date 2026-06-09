@@ -198,6 +198,15 @@ def test_runtime_metrics_tracks_latest_last_10_and_last_100_runs() -> None:
         "cache_misses": 12,
         "gaming_ocr_cache_hits": 0,
         "gaming_ocr_cache_misses": 0,
+        "ocr_skipped_count": 0,
+        "translation_skipped_count": 0,
+        "translation_request_count": 0,
+        "translation_reused_inflight_count": 0,
+        "ocr_history_cache_hits": 0,
+        "ocr_history_cache_misses": 0,
+        "translation_history_cache_hits": 0,
+        "translation_history_cache_misses": 0,
+        "ocr_history_cache_size": 0,
     }
 
 
@@ -205,7 +214,32 @@ def test_runtime_metrics_diagnostic_lines_show_performance_counters() -> None:
     metrics = RuntimeMetrics()
     metrics.record_gaming_ocr_cache_hit()
     metrics.record_gaming_ocr_cache_miss()
+    metrics.record_ocr_skipped("image_unchanged")
+    metrics.record_ocr_history_cache_hit(cache_size=2)
+    metrics.record_ocr_history_cache_miss(cache_size=2)
+    metrics.record_translation_history_cache_hit()
+    metrics.record_translation_history_cache_miss()
+    metrics.record_translation_skipped("ocr_text_unchanged")
+    metrics.record_translation_request_count(2)
+    metrics.record_translation_reused_inflight(1)
     metrics.record_reading_auto_stopped_by_gaming()
+    metrics.record_zone_run(
+        zone_id="zone-a",
+        capture_ms=5.0,
+        ocr_ms=20.0,
+        translation_ms=10.0,
+        image_changed=True,
+        image_diff_score=0.5,
+        ocr_cache_hit=False,
+        ocr_cache_miss=True,
+        translation_cache_hit=False,
+        translation_cache_miss=True,
+        ocr_skipped_reason=None,
+        translation_skipped_reason=None,
+        resized_before_ocr=True,
+        original_size=(1200, 300),
+        resized_size=(800, 200),
+    )
     metrics.record_pipeline_run(
         PipelineTimings(
             capture_ms=10.0,
@@ -230,11 +264,52 @@ def test_runtime_metrics_diagnostic_lines_show_performance_counters() -> None:
         "Cache Misses: 4",
         "Gaming OCR Cache Hits: 1",
         "Gaming OCR Cache Misses: 1",
+        "OCR History Cache Hits: 1",
+        "OCR History Cache Misses: 1",
+        "OCR History Cache Size: 2",
+        "Translation History Cache Hits: 1",
+        "Translation History Cache Misses: 1",
+        "OCR Skipped: 1",
+        "Translation Skipped: 1",
+        "Translation Requests: 2",
+        "Inflight Translation Reuse: 1",
         "Reading Auto-Stopped By Gaming: yes",
         "Latest Latency: 36.00 ms",
         "Average Latency (10): 36.00 ms",
         "Average Latency (100): 36.00 ms",
+        "Slowest Zone: zone-a 35.00 ms",
+        "Average Zone Latency: 35.00 ms",
     ]
+
+
+def test_runtime_metrics_records_zone_latency_and_skip_reasons() -> None:
+    metrics = RuntimeMetrics()
+
+    metrics.record_zone_run(
+        zone_id="zone-a",
+        capture_ms=3.0,
+        ocr_ms=0.0,
+        translation_ms=0.0,
+        image_changed=False,
+        image_diff_score=0.0,
+        ocr_cache_hit=True,
+        ocr_cache_miss=False,
+        translation_cache_hit=True,
+        translation_cache_miss=False,
+        ocr_skipped_reason="image_unchanged",
+        translation_skipped_reason="ocr_text_unchanged",
+        resized_before_ocr=False,
+        original_size=(300, 100),
+        resized_size=(300, 100),
+    )
+
+    snapshot = metrics.pipeline_snapshot()
+
+    assert snapshot["zone_latency"]["slowest_zone_id"] == "zone-a"
+    assert snapshot["zone_latency"]["slowest_zone_ms"] == 3.0
+    assert snapshot["zone_latency"]["average_zone_ms"] == 3.0
+    assert snapshot["zone_latest"]["zone-a"]["ocr_skipped_reason"] == "image_unchanged"
+    assert snapshot["zone_latest"]["zone-a"]["translation_skipped_reason"] == "ocr_text_unchanged"
 
 
 def test_translation_overlay_stays_separate_when_debug_overlay_disabled(monkeypatch) -> None:

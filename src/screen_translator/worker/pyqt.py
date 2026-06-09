@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from screen_translator.worker.base import WorkerError, WorkerSuccess, WorkerTask
+from screen_translator.worker.base import (
+    WorkerError,
+    WorkerProgressCallback,
+    WorkerSuccess,
+    WorkerTask,
+)
 
 
 class PyQtWorkerError(RuntimeError):
@@ -25,8 +30,10 @@ class PyQtWorker:
         self._signals = _create_signal_bridge(QtCore)()
         self._signals.success.connect(self._handle_success)
         self._signals.error.connect(self._handle_error)
+        self._signals.progress.connect(self._handle_progress)
         self._success_callbacks: dict[int, WorkerSuccess] = {}
         self._error_callbacks: dict[int, WorkerError] = {}
+        self._progress_callbacks: dict[int, WorkerProgressCallback] = {}
 
     def submit(
         self,
@@ -34,6 +41,7 @@ class PyQtWorker:
         task: WorkerTask,
         on_success: WorkerSuccess,
         on_error: WorkerError,
+        on_progress: WorkerProgressCallback | None = None,
     ) -> bool:
         if self._busy:
             return False
@@ -41,6 +49,8 @@ class PyQtWorker:
         self._cancelled_jobs.discard(job_id)
         self._success_callbacks[job_id] = on_success
         self._error_callbacks[job_id] = on_error
+        if on_progress is not None:
+            self._progress_callbacks[job_id] = on_progress
         runnable = _create_runnable(self._QtCore, job_id, task, self._signals)
         self._pool.start(runnable)
         return True
@@ -49,7 +59,15 @@ class PyQtWorker:
         self._cancelled_jobs.update(self._success_callbacks)
         self._success_callbacks.clear()
         self._error_callbacks.clear()
+        self._progress_callbacks.clear()
         self._busy = False
+
+    def _handle_progress(self, job_id: int, result: Any) -> None:
+        if job_id in self._cancelled_jobs:
+            return
+        callback = self._progress_callbacks.get(job_id)
+        if callback is not None:
+            callback(job_id, result)
 
     def _handle_success(self, job_id: int, result: Any) -> None:
         self._busy = False
@@ -58,6 +76,7 @@ class PyQtWorker:
             return
         callback = self._success_callbacks.pop(job_id, None)
         self._error_callbacks.pop(job_id, None)
+        self._progress_callbacks.pop(job_id, None)
         if callback is not None:
             callback(job_id, result)
 
@@ -68,6 +87,7 @@ class PyQtWorker:
             return
         callback = self._error_callbacks.pop(job_id, None)
         self._success_callbacks.pop(job_id, None)
+        self._progress_callbacks.pop(job_id, None)
         if callback is not None:
             callback(job_id, error)
 
@@ -76,6 +96,7 @@ def _create_signal_bridge(QtCore: Any) -> type[Any]:
     class WorkerSignals(QtCore.QObject):  # type: ignore[misc]
         success = QtCore.pyqtSignal(int, object)
         error = QtCore.pyqtSignal(int, object)
+        progress = QtCore.pyqtSignal(int, object)
 
     return WorkerSignals
 
@@ -84,7 +105,8 @@ def _create_runnable(QtCore: Any, job_id: int, task: WorkerTask, signals: Any) -
     class WorkerRunnable(QtCore.QRunnable):  # type: ignore[misc]
         def run(self) -> None:
             try:
-                signals.success.emit(job_id, task())
+                progress = lambda payload: signals.progress.emit(job_id, payload)
+                signals.success.emit(job_id, task(progress))
             except Exception as exc:
                 signals.error.emit(job_id, exc)
 

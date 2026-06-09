@@ -7,6 +7,8 @@ from typing import Any
 
 from screen_translator.config import AppConfig
 from screen_translator.domain.models import (
+    OcrEngineMode,
+    OcrPreprocessMode,
     OverlayStyleMode,
     ScreenRegion,
     TranslationZone,
@@ -17,6 +19,9 @@ from screen_translator.hotkeys.windows import hotkey_spec_from_text
 DEFAULT_SETTINGS_FILENAME = "settings.json"
 PROVIDER_OPTIONS = ("mock", "googletrans", "google")
 SOURCE_LANGUAGE_OPTIONS = ("auto", "en", "ja", "zh", "ko")
+SPEED_PROFILE_OPTIONS = ("fast", "balanced", "accurate")
+OCR_ENGINE_OPTIONS = ("auto", "paddle", "windows")
+OCR_PREPROCESS_OPTIONS = ("none", "grayscale", "threshold", "invert", "contrast")
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +49,21 @@ class ControlPanelSettings:
     overlay_inline_max_font_size: int = 22
     overlay_inline_padding: int = 6
     overlay_inline_allow_expand_ratio: float = 1.5
+    overlay_inline_max_lines: int = 4
+    overlay_inline_long_text_fallback: str = "none"
+    speed_profile: str = "balanced"
+    fast_ocr: bool = True
+    ocr_max_image_width: int = 800
+    ocr_min_confidence: float = 0.60
+    ocr_min_block_width: int = 8
+    ocr_min_block_height: int = 8
+    ocr_max_blocks_gaming: int = 5
+    zone_min_ocr_interval_ms: int = 500
+    translation_debounce_ms: int = 300
+    show_translating_placeholder: bool = True
+    ocr_history_cache_size: int = 256
+    ocr_history_cache_ttl_ms: int = 300000
+    ocr_stability_frames: int = 2
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "translation_provider", self.translation_provider.strip().lower())
@@ -69,6 +89,34 @@ class ControlPanelSettings:
             raise ValueError("Inline padding must not be negative")
         if self.overlay_inline_allow_expand_ratio < 1.0:
             raise ValueError("Inline expand ratio must be at least 1.0")
+        if self.overlay_inline_max_lines <= 0:
+            raise ValueError("Inline max lines must be positive")
+        fallback = self.overlay_inline_long_text_fallback.strip().lower()
+        if fallback not in {"none", "floating_panel"}:
+            raise ValueError("Inline long text fallback must be 'none' or 'floating_panel'")
+        object.__setattr__(self, "overlay_inline_long_text_fallback", fallback)
+        profile = self.speed_profile.strip().lower()
+        if profile not in SPEED_PROFILE_OPTIONS:
+            raise ValueError(f"Unsupported speed profile: {self.speed_profile}")
+        object.__setattr__(self, "speed_profile", profile)
+        if self.ocr_max_image_width <= 0:
+            raise ValueError("OCR max image width must be positive")
+        if not 0 <= self.ocr_min_confidence <= 1:
+            raise ValueError("OCR minimum confidence must be between 0 and 1")
+        if self.ocr_min_block_width <= 0 or self.ocr_min_block_height <= 0:
+            raise ValueError("OCR minimum block size must be positive")
+        if self.ocr_max_blocks_gaming <= 0:
+            raise ValueError("Gaming OCR max blocks must be positive")
+        if self.zone_min_ocr_interval_ms < 0:
+            raise ValueError("Zone OCR interval must not be negative")
+        if self.translation_debounce_ms < 0:
+            raise ValueError("Translation debounce must not be negative")
+        if self.ocr_history_cache_size < 0:
+            raise ValueError("OCR history cache size must not be negative")
+        if self.ocr_history_cache_ttl_ms < 0:
+            raise ValueError("OCR history cache TTL must not be negative")
+        if self.ocr_stability_frames <= 0:
+            raise ValueError("OCR stability frames must be positive")
 
     @classmethod
     def defaults(cls) -> ControlPanelSettings:
@@ -94,6 +142,21 @@ class ControlPanelSettings:
             overlay_inline_max_font_size=config.overlay_inline_max_font_size,
             overlay_inline_padding=config.overlay_inline_padding,
             overlay_inline_allow_expand_ratio=config.overlay_inline_allow_expand_ratio,
+            overlay_inline_max_lines=config.overlay_inline_max_lines,
+            overlay_inline_long_text_fallback=config.overlay_inline_long_text_fallback,
+            speed_profile=config.speed_profile,
+            fast_ocr=config.fast_ocr,
+            ocr_max_image_width=config.ocr_max_image_width,
+            ocr_min_confidence=config.ocr_min_confidence,
+            ocr_min_block_width=config.ocr_min_block_width,
+            ocr_min_block_height=config.ocr_min_block_height,
+            ocr_max_blocks_gaming=config.ocr_max_blocks_gaming,
+            zone_min_ocr_interval_ms=config.zone_min_ocr_interval_ms,
+            translation_debounce_ms=config.translation_debounce_ms,
+            show_translating_placeholder=config.show_translating_placeholder,
+            ocr_history_cache_size=config.ocr_history_cache_size,
+            ocr_history_cache_ttl_ms=config.ocr_history_cache_ttl_ms,
+            ocr_stability_frames=config.ocr_stability_frames,
             debug_mode=config.debug_mode,
             debug_overlay_enabled=config.debug_overlay_enabled,
         )
@@ -138,6 +201,21 @@ class ControlPanelSettings:
             overlay_inline_max_font_size=self.overlay_inline_max_font_size,
             overlay_inline_padding=self.overlay_inline_padding,
             overlay_inline_allow_expand_ratio=self.overlay_inline_allow_expand_ratio,
+            overlay_inline_max_lines=self.overlay_inline_max_lines,
+            overlay_inline_long_text_fallback=self.overlay_inline_long_text_fallback,
+            speed_profile=self.speed_profile,
+            fast_ocr=self.fast_ocr,
+            ocr_max_image_width=self.ocr_max_image_width,
+            ocr_min_confidence=self.ocr_min_confidence,
+            ocr_min_block_width=self.ocr_min_block_width,
+            ocr_min_block_height=self.ocr_min_block_height,
+            ocr_max_blocks_gaming=self.ocr_max_blocks_gaming,
+            zone_min_ocr_interval_ms=self.zone_min_ocr_interval_ms,
+            translation_debounce_ms=self.translation_debounce_ms,
+            show_translating_placeholder=self.show_translating_placeholder,
+            ocr_history_cache_size=self.ocr_history_cache_size,
+            ocr_history_cache_ttl_ms=self.ocr_history_cache_ttl_ms,
+            ocr_stability_frames=self.ocr_stability_frames,
             reading_interval_ms=self.reading_interval_ms,
             reading_change_threshold=self.reading_change_threshold,
             reading_missing_timeout_ms=self.reading_missing_timeout_ms,
@@ -213,6 +291,9 @@ def _zone_from_payload(value: object) -> TranslationZone:
             overlay_style=OverlayStyleMode(
                 value.get("overlay_style", OverlayStyleMode.FLOATING_PANEL)
             ),
+            ocr_engine=value.get("ocr_engine", OcrEngineMode.AUTO),
+            ocr_preprocess=value.get("ocr_preprocess", OcrPreprocessMode.NONE),
+            speed_profile=str(value.get("speed_profile", "balanced")),
             created_at=str(value.get("created_at", "")),
             updated_at=str(value.get("updated_at", "")),
         )
@@ -235,6 +316,9 @@ def _zone_to_payload(zone: TranslationZone) -> dict[str, object]:
         "translation_visible": zone.translation_visible,
         "mode": zone.mode.value,
         "overlay_style": zone.overlay_style.value,
+        "ocr_engine": zone.ocr_engine.value,
+        "ocr_preprocess": zone.ocr_preprocess.value,
+        "speed_profile": zone.speed_profile,
         "created_at": zone.created_at,
         "updated_at": zone.updated_at,
     }

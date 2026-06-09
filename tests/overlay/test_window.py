@@ -201,6 +201,108 @@ def test_blur_overlay_window_renders_inline_item_style(monkeypatch: pytest.Monke
     assert "font-size: 12px;" in labels[0].stylesheet
     assert "padding: 6px;" in labels[0].stylesheet
     assert "border-radius: 2px;" in labels[0].stylesheet
+    assert "line-height:" in labels[0].stylesheet
+    assert "rgba(0, 0, 0, 220)" in labels[0].stylesheet
+
+
+def test_blur_overlay_window_hides_overlapping_inline_item_for_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    labels: list[object] = []
+    windows: list[object] = []
+    _install_fake_qt(monkeypatch, labels, windows=windows)
+    overlay = BlurOverlayWindow()
+    overlay.show_items(
+        [
+            OverlayItem(
+                text="Xin chao",
+                region=ScreenRegion(10, 20, 140, 36),
+                style="inline_replace",
+                zone_id="zone-inline",
+            ),
+            OverlayItem(
+                text="Outside",
+                region=ScreenRegion(400, 20, 140, 36),
+                style="inline_replace",
+                zone_id="zone-outside",
+            ),
+        ]
+    )
+
+    result = overlay.hide_for_capture_regions((ScreenRegion(0, 0, 200, 100),))
+
+    assert result == (1, 1)
+    assert labels[0].visible is False
+    assert labels[1].visible is True
+    assert windows[0].hide_calls == 0
+
+
+def test_blur_overlay_window_does_not_duplicate_existing_ellipsis_for_overflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    labels: list[object] = []
+    _install_fake_qt(monkeypatch, labels)
+
+    BlurOverlayWindow().show_items(
+        [
+            OverlayItem(
+                text="Dong mot\nDong hai...",
+                region=ScreenRegion(10, 20, 140, 44),
+                style="inline_replace",
+                font_size=8,
+                padding=6,
+                overflow=True,
+                line_count=2,
+                line_height=10,
+            )
+        ]
+    )
+
+    assert labels[0].text == "Dong mot\nDong hai..."
+
+
+def test_blur_overlay_window_replaces_only_requested_zone_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    labels: list[object] = []
+    _install_fake_qt(monkeypatch, labels)
+    overlay = BlurOverlayWindow()
+    overlay.show_items(
+        [
+            OverlayItem("A first", ScreenRegion(10, 20, 120, 36), zone_id="zone-a"),
+            OverlayItem("B first", ScreenRegion(200, 20, 120, 36), zone_id="zone-b"),
+        ]
+    )
+
+    overlay.replace_zone_items(
+        "zone-a",
+        [OverlayItem("A second", ScreenRegion(10, 20, 120, 36), zone_id="zone-a")],
+    )
+
+    active_labels = [label for label in labels if not getattr(label, "deleted", False)]
+    assert [label.text for label in active_labels] == ["B first", "A second"]
+    assert labels[0].deleted is True
+    assert not getattr(labels[1], "deleted", False)
+
+
+def test_blur_overlay_window_skips_identical_zone_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    labels: list[object] = []
+    windows: list[object] = []
+    _install_fake_qt(monkeypatch, labels, windows=windows)
+    overlay = BlurOverlayWindow()
+    item = OverlayItem("A first", ScreenRegion(10, 20, 120, 36), zone_id="zone-a")
+    overlay.show_items([item])
+
+    overlay.replace_zone_items("zone-a", [item])
+
+    active_labels = [label for label in labels if not getattr(label, "deleted", False)]
+    assert [label.text for label in active_labels] == ["A first"]
+    assert len(labels) == 1
+    assert getattr(overlay, "noop_zone_update_count") == 1
+    assert getattr(overlay, "replaced_zone_count") == 0
+    assert windows[0].fullscreen_calls == 1
 
 
 def test_clamp_items_to_window_keeps_panels_non_overlapping_near_bottom() -> None:

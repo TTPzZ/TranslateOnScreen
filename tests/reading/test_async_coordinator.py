@@ -24,13 +24,14 @@ class FakeWorker:
         self.last_on_success = None
         self.last_on_error = None
 
-    def submit(self, job_id, task, on_success, on_error) -> bool:
+    def submit(self, job_id, task, on_success, on_error, on_progress=None) -> bool:
         if self.running:
             return False
         self.running = True
         self.submitted.append((job_id, task))
         self.last_on_success = on_success
         self.last_on_error = on_error
+        self.last_on_progress = on_progress
         return True
 
     def cancel(self) -> None:
@@ -82,7 +83,8 @@ class FakeReadingPipeline:
         self.process_calls.append(captured)
         return ReadingJobResult(items=[OverlayItem("Xin chao", captured.region)], metrics=None, had_text=True)
 
-    def process_next_frame(self) -> ReadingJobResult:
+    def process_next_frame(self, progress_callback=None) -> ReadingJobResult:
+        del progress_callback
         return self.process_captured_frame(self.capture_frame())
 
     def apply_result(self, result: ReadingJobResult) -> None:
@@ -162,6 +164,41 @@ def test_async_reading_runner_can_start_with_zones() -> None:
     assert pipeline.zones == (zone,)
     assert timer.started == [500]
     assert result.items[0].text == "Xin chao"
+
+
+def test_async_reading_runner_applies_incremental_progress_results() -> None:
+    worker = FakeWorker()
+    metrics = RuntimeMetrics()
+    pipeline = FakeReadingPipeline()
+    progress_result = ReadingJobResult(
+        items=[OverlayItem("Cached", ScreenRegion(10, 20, 100, 40), zone_id="zone-a")],
+        metrics=None,
+        had_text=True,
+        zone_id="zone-a",
+    )
+    final_result = ReadingJobResult(items=[], metrics=None, had_text=True, rendered_incrementally=True)
+    applied: list[ReadingJobResult] = []
+
+    def process_next_frame(progress_callback=None) -> ReadingJobResult:
+        progress_callback(progress_result)
+        return final_result
+
+    pipeline.process_next_frame = process_next_frame
+    pipeline.apply_result = applied.append
+    runner = AsyncReadingModeRunner(
+        pipeline=pipeline,
+        worker=worker,
+        timer=FakeTimer(),
+        metrics=metrics,
+        interval_ms=500,
+    )
+
+    runner.start_zones(())
+    runner.on_interval()
+    result = worker.submitted[0][1](lambda payload: worker.last_on_progress(1, payload))
+    worker.last_on_success(1, result)
+
+    assert applied == [progress_result, final_result]
 
 
 def test_async_reading_runner_ignores_stale_result_after_stop() -> None:
@@ -863,16 +900,22 @@ def test_mode_controller_overlay_toolbar_actions_update_and_persist_settings() -
     assert overlay.callbacks.on_move("zone-1") is True
     assert overlay.callbacks.on_style_change("zone-1", "inline_replace") is True
     assert overlay.callbacks.on_mode_change("zone-1", "both") is True
+    assert overlay.callbacks.on_ocr_engine_change("zone-1", "windows") is True
+    assert overlay.callbacks.on_ocr_preprocess_change("zone-1", "threshold") is True
+    assert overlay.callbacks.on_speed_profile_change("zone-1", "fast") is True
 
     updated = controller.settings().zones[0]
     assert updated.region == ScreenRegion(50, 60, 200, 80)
     assert updated.overlay_style == OverlayStyleMode.INLINE_REPLACE
     assert updated.mode == TranslationZoneMode.BOTH
-    assert len(store.saved) == 3
+    assert updated.ocr_engine == "windows"
+    assert updated.ocr_preprocess == "threshold"
+    assert updated.speed_profile == "fast"
+    assert len(store.saved) == 6
 
     assert overlay.callbacks.on_delete("zone-1") is True
     assert controller.settings().zones == ()
-    assert len(store.saved) == 4
+    assert len(store.saved) == 7
 
 
 def test_mode_controller_toggle_zone_borders_and_delete_all_zones() -> None:

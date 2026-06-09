@@ -17,6 +17,9 @@ class OcrMergePolicy:
     tiny_area_threshold: int = 400
     tiny_high_confidence: float = 0.9
     tiny_text_length: int = 3
+    min_block_width: int = 1
+    min_block_height: int = 1
+    max_blocks: int | None = None
 
 
 class OcrBlockMerger:
@@ -35,11 +38,18 @@ class OcrBlockMerger:
             return []
 
         lines = self._merge_lines(filtered)
-        return self._merge_paragraphs(lines)
+        paragraphs = self._merge_paragraphs(lines)
+        if self._policy.max_blocks is not None:
+            return paragraphs[: self._policy.max_blocks]
+        return paragraphs
 
     def _should_keep(self, block: OcrTextBlock) -> bool:
         text = block.text.strip()
         if not text or block.confidence < self._policy.min_confidence:
+            return False
+        if block.region.width < self._policy.min_block_width:
+            return False
+        if block.region.height < self._policy.min_block_height:
             return False
 
         area = block.region.width * block.region.height

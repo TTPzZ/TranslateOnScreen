@@ -232,11 +232,20 @@ def test_control_panel_presenter_shows_runtime_diagnostics() -> None:
             return [
                 "OCR Count: 3",
                 "Translation Count: 2",
+                "Translation Skipped: 1",
                 "Cache Hits: 1",
                 "Cache Misses: 1",
+                "OCR Skipped: 6",
+                "OCR History Cache Hits: 3",
+                "OCR History Cache Misses: 2",
+                "OCR History Cache Size: 5",
+                "Translation History Cache Hits: 4",
+                "Translation History Cache Misses: 1",
                 "Gaming OCR Cache Hits: 4",
                 "Gaming OCR Cache Misses: 5",
                 "Average Latency (10): 420.00 ms",
+                "Average Zone Latency: 120.00 ms",
+                "Slowest Zone: zone-a 150.00 ms",
                 "Reading Zones: 2",
                 "Gaming Zones: 1",
                 "Both Zones: 1",
@@ -245,10 +254,27 @@ def test_control_panel_presenter_shows_runtime_diagnostics() -> None:
     presenter = ControlPanelPresenter(ControllerWithDiagnostics())
 
     assert presenter.diagnostic_groups() == {
-        "Translation": ["Translation Count: 2", "Cache Hits: 1", "Cache Misses: 1"],
-        "OCR": ["OCR Count: 3"],
+        "Translation": [
+            "Translation Count: 2",
+            "Translation Skipped: 1",
+            "Cache Hits: 1",
+            "Cache Misses: 1",
+            "Translation History Cache Hits: 4",
+            "Translation History Cache Misses: 1",
+        ],
+        "OCR": [
+            "OCR Count: 3",
+            "OCR Skipped: 6",
+            "OCR History Cache Hits: 3",
+            "OCR History Cache Misses: 2",
+            "OCR History Cache Size: 5",
+        ],
         "Gaming": ["Gaming OCR Cache Hits: 4", "Gaming OCR Cache Misses: 5"],
-        "Latency": ["Average Latency (10): 420.00 ms"],
+        "Latency": [
+            "Average Latency (10): 420.00 ms",
+            "Average Zone Latency: 120.00 ms",
+            "Slowest Zone: zone-a 150.00 ms",
+        ],
         "Zones": ["Reading Zones: 2", "Gaming Zones: 1", "Both Zones: 1"],
         "General": [],
     }
@@ -295,6 +321,7 @@ def test_control_panel_translation_tab_contains_translation_and_overlay_settings
     assert "Provider" in window.combos
     assert "Source Language" in window.combos
     assert "Target Language" in window.combos
+    assert "Speed Profile" in window.combos
     assert "Server URL" in window.fields
     assert "Overlay Font Size" in window.spinboxes
     assert "Panel Opacity" in window.spinboxes
@@ -324,6 +351,7 @@ def test_control_panel_save_settings_reads_fields_and_updates_controller() -> No
     presenter = ControlPanelPresenter(controller)
     window = _build_window(FakeQtWidgets, presenter)
     window.combos["Provider"].setCurrentText("googletrans")
+    window.combos["Speed Profile"].setCurrentText("fast")
     window.fields["Target Language"].setText("vi")
     window.hotkey_recorders["Gaming Hotkey"].record_key("T", modifiers=("Ctrl", "Shift"))
     window.hotkey_recorders["Gaming Dismiss Hotkey"].record_key("Escape")
@@ -333,6 +361,7 @@ def test_control_panel_save_settings_reads_fields_and_updates_controller() -> No
 
     assert controller.calls == ["save_settings"]
     assert controller.settings().translation_provider == "googletrans"
+    assert controller.settings().speed_profile == "fast"
     assert controller.settings().to_config().translation_provider == "googletrans"
     assert controller.settings().target_language == "vi"
     assert controller.settings().gaming_hotkey == "Ctrl+Shift+T"
@@ -422,6 +451,20 @@ def test_control_panel_zones_tab_is_simplified_and_routes_global_zone_buttons() 
     assert "Edit Zones" in window.checkboxes
 
 
+def test_control_panel_zones_tab_exposes_reading_mode_start_stop_buttons() -> None:
+    controller = FakeController()
+    presenter = ControlPanelPresenter(controller)
+    window = _build_window(FakeQtWidgets, presenter)
+
+    assert "Start Reading Mode" in window.buttons
+    assert "Stop Reading Mode" in window.buttons
+
+    window.buttons["Start Reading Mode"].click()
+    window.buttons["Stop Reading Mode"].click()
+
+    assert controller.calls == ["start_reading_mode", "stop_reading_mode"]
+
+
 def test_control_panel_has_single_global_save_and_reset_buttons() -> None:
     controller = FakeController()
     presenter = ControlPanelPresenter(controller)
@@ -461,19 +504,45 @@ def test_control_panel_advanced_tab_exposes_grouped_diagnostics() -> None:
                 "Cache Hits: 3",
                 "Cache Misses: 2",
                 "OCR Count: 5",
+                "OCR Skipped: 4",
+                "OCR History Cache Hits: 9",
+                "OCR History Cache Misses: 3",
+                "OCR History Cache Size: 12",
+                "Translation Skipped: 2",
+                "Translation History Cache Hits: 7",
+                "Translation History Cache Misses: 2",
                 "Gaming OCR Cache Hits: 1",
                 "Latest Latency: 36.00 ms",
+                "Average Zone Latency: 22.00 ms",
+                "Slowest Zone: zone-a 44.00 ms",
                 "Reading Zones: 2",
             ]
 
     presenter = ControlPanelPresenter(ControllerWithDiagnostics())
     window = _build_window(FakeQtWidgets, presenter)
 
-    assert window.diagnostic_groups["Translation"] == ["Cache Hits: 3", "Cache Misses: 2"]
-    assert window.diagnostic_groups["OCR"] == ["OCR Count: 5"]
+    assert window.diagnostic_groups["Translation"] == [
+        "Cache Hits: 3",
+        "Cache Misses: 2",
+        "Translation Skipped: 2",
+        "Translation History Cache Hits: 7",
+        "Translation History Cache Misses: 2",
+    ]
+    assert window.diagnostic_groups["OCR"] == [
+        "OCR Count: 5",
+        "OCR Skipped: 4",
+        "OCR History Cache Hits: 9",
+        "OCR History Cache Misses: 3",
+        "OCR History Cache Size: 12",
+    ]
     assert window.diagnostic_groups["Gaming"] == ["Gaming OCR Cache Hits: 1"]
-    assert window.diagnostic_groups["Latency"] == ["Latest Latency: 36.00 ms"]
+    assert window.diagnostic_groups["Latency"] == [
+        "Latest Latency: 36.00 ms",
+        "Average Zone Latency: 22.00 ms",
+        "Slowest Zone: zone-a 44.00 ms",
+    ]
     assert window.diagnostic_groups["Zones"] == ["Reading Zones: 2"]
+    assert window.diagnostic_groups["General"] == []
 
 
 def test_control_panel_native_event_filter_dispatches_hotkey_message() -> None:

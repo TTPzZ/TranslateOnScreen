@@ -9,7 +9,14 @@ from typing import Protocol
 from uuid import uuid4
 
 from screen_translator.controller.state import ModeState
-from screen_translator.domain.models import OverlayStyleMode, ScreenRegion, TranslationZone, TranslationZoneMode
+from screen_translator.domain.models import (
+    OcrEngineMode,
+    OcrPreprocessMode,
+    OverlayStyleMode,
+    ScreenRegion,
+    TranslationZone,
+    TranslationZoneMode,
+)
 from screen_translator.instrumentation import RuntimeMetrics
 from screen_translator.overlay.zones import ZoneOverlayCallbacks
 from screen_translator.ui.server_process import LocalServerController
@@ -234,6 +241,53 @@ class ModeController:
                 updated_at=self._timestamp_factory(),
             ),
             "Zone mode updated",
+        )
+
+    def set_zone_ocr_engine(self, zone_id: str, engine: str) -> bool:
+        try:
+            ocr_engine = OcrEngineMode(engine)
+        except ValueError as exc:
+            self._set_error(exc)
+            return False
+        return self._update_zone(
+            zone_id,
+            lambda zone: replace(
+                zone,
+                ocr_engine=ocr_engine,
+                updated_at=self._timestamp_factory(),
+            ),
+            "Zone OCR engine updated",
+        )
+
+    def set_zone_ocr_preprocess(self, zone_id: str, preprocess: str) -> bool:
+        try:
+            ocr_preprocess = OcrPreprocessMode(preprocess)
+        except ValueError as exc:
+            self._set_error(exc)
+            return False
+        return self._update_zone(
+            zone_id,
+            lambda zone: replace(
+                zone,
+                ocr_preprocess=ocr_preprocess,
+                updated_at=self._timestamp_factory(),
+            ),
+            "Zone OCR preprocess updated",
+        )
+
+    def set_zone_speed_profile(self, zone_id: str, profile: str) -> bool:
+        normalized = profile.strip().lower()
+        if normalized not in {"fast", "balanced", "accurate"}:
+            self._set_error(f"Unsupported speed profile: {profile}")
+            return False
+        return self._update_zone(
+            zone_id,
+            lambda zone: replace(
+                zone,
+                speed_profile=normalized,
+                updated_at=self._timestamp_factory(),
+            ),
+            "Zone speed profile updated",
         )
 
     def edit_zone_position(self, zone_id: str) -> bool:
@@ -608,6 +662,9 @@ class ModeController:
                 on_move=self.edit_zone_position,
                 on_style_change=self.set_zone_overlay_style,
                 on_mode_change=self.set_zone_mode,
+                on_ocr_engine_change=self.set_zone_ocr_engine,
+                on_ocr_preprocess_change=self.set_zone_ocr_preprocess,
+                on_speed_profile_change=self.set_zone_speed_profile,
             )
         )
 

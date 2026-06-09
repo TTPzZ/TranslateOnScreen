@@ -19,6 +19,9 @@ desktop = [
     "PyQt6>=6.7",
     "paddleocr>=2.7",
 ]
+windows-ocr = [
+    "winrt-Windows.Media.Ocr>=3.2.1; platform_system == 'Windows'",
+]
 google = [
     "google-cloud-translate>=3.15",
 ]

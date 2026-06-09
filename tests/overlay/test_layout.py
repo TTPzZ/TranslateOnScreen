@@ -118,12 +118,42 @@ def test_fit_inline_text_marks_overflow_when_text_still_does_not_fit() -> None:
         max_font_size=22,
         padding=6,
         allow_expand_ratio=1.5,
+        max_lines=4,
     )
 
     assert layout.font_size == 8
     assert layout.overflow is True
     assert layout.region.right <= zone.right
     assert layout.region.bottom <= zone.bottom
+
+
+def test_fit_inline_text_truncates_very_long_vietnamese_text_without_line_overlap() -> None:
+    zone = ScreenRegion(40, 60, 180, 110)
+    ocr_box = ScreenRegion(8, 10, 120, 24)
+    text = (
+        "Day la mot doan van tieng Viet rat dai voi nhieu noi dung can duoc hien thi "
+        "trong mot vung nho ma khong duoc chong dong len nhau"
+    )
+
+    layout = fit_inline_text(
+        text,
+        ocr_box,
+        zone_region=zone,
+        screen_bounds=ScreenRegion(0, 0, 800, 600),
+        min_font_size=8,
+        max_font_size=22,
+        padding=6,
+        allow_expand_ratio=1.5,
+        max_lines=4,
+    )
+
+    assert layout.overflow is True
+    assert layout.text.endswith("...")
+    assert 1 <= layout.line_count <= 4
+    assert layout.line_height >= layout.font_size
+    assert layout.region.height >= layout.line_count * layout.line_height + 12
+    assert layout.region.height >= ocr_box.height
+    assert len(layout.text.splitlines()) <= 4
 
 
 def test_build_overlay_items_inline_replace_uses_ocr_bbox_instead_of_floating_panel() -> None:
@@ -152,6 +182,8 @@ def test_build_overlay_items_inline_replace_uses_ocr_bbox_instead_of_floating_pa
     assert items[0].font_size == 22
     assert items[0].padding == 6
     assert items[0].overflow is False
+    assert items[0].line_count == 1
+    assert items[0].line_height is not None
 
 
 def test_build_overlay_items_inline_replace_uses_one_font_size_per_block() -> None:
@@ -180,6 +212,59 @@ def test_build_overlay_items_inline_replace_uses_one_font_size_per_block() -> No
     assert len(items) == 2
     assert all(isinstance(item.font_size, int) for item in items)
     assert items[0].font_size != items[1].font_size
+
+
+def test_build_overlay_items_inline_replace_truncates_when_text_exceeds_max_lines() -> None:
+    zone = ScreenRegion(100, 200, 180, 110)
+    block = OcrTextBlock("Long", 0.95, ScreenRegion(10, 10, 120, 24))
+    text = " ".join(["ban", "dich", "tieng", "Viet", "rat", "dai"] * 10)
+
+    items = build_overlay_items(
+        [block],
+        [text],
+        selected_region=zone,
+        screen_bounds=ScreenRegion(0, 0, 800, 600),
+        overlay_style="inline_replace",
+        inline_min_font_size=8,
+        inline_max_font_size=22,
+        inline_padding=6,
+        inline_allow_expand_ratio=1.5,
+        inline_max_lines=4,
+    )
+
+    assert len(items) == 1
+    assert items[0].style == "inline_replace"
+    assert items[0].overflow is True
+    assert items[0].text.endswith("...")
+    assert items[0].line_count is not None
+    assert items[0].line_count <= 4
+    assert items[0].line_height is not None
+    assert items[0].region.height >= items[0].line_count * items[0].line_height + 12
+
+
+def test_build_overlay_items_inline_replace_can_fallback_to_floating_panel_for_long_text() -> None:
+    zone = ScreenRegion(100, 200, 180, 110)
+    block = OcrTextBlock("Long", 0.95, ScreenRegion(10, 10, 120, 24))
+    text = " ".join(["ban", "dich", "tieng", "Viet", "rat", "dai"] * 10)
+
+    items = build_overlay_items(
+        [block],
+        [text],
+        selected_region=zone,
+        screen_bounds=ScreenRegion(0, 0, 800, 600),
+        overlay_style="inline_replace",
+        inline_min_font_size=8,
+        inline_max_font_size=22,
+        inline_padding=6,
+        inline_allow_expand_ratio=1.5,
+        inline_max_lines=4,
+        inline_long_text_fallback="floating_panel",
+    )
+
+    assert len(items) == 1
+    assert items[0].style == "floating_panel"
+    assert items[0].font_size is None
+    assert items[0].text == text
 
 
 def test_build_overlay_items_sizes_vietnamese_translation_beyond_source_bbox() -> None:
